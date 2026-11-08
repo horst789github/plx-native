@@ -1,0 +1,218 @@
+name: PlxNative 0.9.0 - DE Online-Trailer IPK
+
+# Nur auf Knopfdruck bauen. Deine normale TV-App wird nicht ueberschrieben.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ipk:
+    # Linux ARM64 ist die Host-Architektur des von PlxNative verwendeten webOS-NDK.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: PlxNative v0.9.0 direkt vom Originalprojekt laden
+        uses: actions/checkout@v4
+        with:
+          repository: GLinnik21/plx-native
+          ref: v0.9.0
+          persist-credentials: false
+
+      - name: On-Demand Trailer-Patch anwenden und pruefen
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/apply_native.py" <<'PY'
+          #!/usr/bin/env python3
+          """Apply the experimental On-Demand German trailer route to EXACT plx-native v0.9.0.
+
+          The SHA checks fail closed on modified sources or another tag. Run on a clean
+          checkout of `git checkout v0.9.0` and build with the project's own toolchain.
+          No independent Rust/webOS build has been verified for this patch.
+          """
+          import argparse
+          import hashlib
+          from pathlib import Path
+
+          EXPECTED = {
+              "rust-modules/data/src/metadata.rs": "26020a84a50bacab5ebe8f07e4ff1b041cc94e53",
+              "rust-modules/media/src/route/plan.rs": "31b313e8f44b44ba917021d601d0ac8334a7184f",
+              "rust-modules/net/src/stream_redirect.rs": "c44765009d2f6317379e68d9868589939666959a",
+          }
+
+          ONLINE_HELPERS = r'''
+          /// Escape UTF-8 bytes for a query string. This is NOT a network operation:
+          /// the Docker service searches only when the playback URL is opened.
+          fn online_trailer_query_escape(raw: &str) -> String {
+              let mut out = String::new();
+              for byte in raw.bytes() {
+                  if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                      out.push(char::from(byte));
+                  } else {
+                      out.push_str(&format!("%{byte:02X}"));
+                  }
+              }
+              out
+          }
+
+          /// A virtual Extras row is only a *promise to look for a trailer*.
+          /// No YouTube request is sent when the page is loaded. The first media open
+          /// at /watch triggers the search on the user's Synology.
+          fn install_online_trailer(d: &mut Detail) {
+              if !extras_wanted(&d.kind) || d.trailer().is_some() || d.title.is_empty() {
+                  return;
+              }
+              let year = if d.year > 0 { d.year.to_string() } else { String::new() };
+              let kind = if d.is_show { "show" } else { "movie" };
+              let url = format!(
+                  "http://192.168.0.2:8765/watch?title={}&year={}&type={kind}",
+                  online_trailer_query_escape(&d.title), year
+              );
+              let key = format!("online-trailer-{}", d.rk);
+              d.extras.push(Extra {
+                  rk: key.clone(),
+                  title: "Trailer (Deutsch, online)".to_owned(),
+                  subtype: "trailer".to_owned(),
+                  extra_type: 1,
+                  part: url,
+                  vcodec: "h264".to_owned(),
+                  acodec: "aac".to_owned(),
+                  ..Default::default()
+              });
+              d.trailer_rk = key;
+          }
+
+          '''
+
+          PLAN_SNIFF = r'''    // PlxNative Online Trailer: this is a trusted, LAN-only direct-play endpoint.
+              // It is a pseudo extra, not a PMS rating key/Part and has no PMS /decision.
+              // The existing media redirect follower handles /watch -> /stream/<nonce>.
+              // It NEVER requests a Youtube stream as part of library browsing.
+              if part.starts_with("http://192.168.0.2:8765/watch?") {
+                  plan.url = part.to_owned();
+                  plan.sess = new_sess(rk);
+                  plan.vcodec = "h264".to_owned();
+                  plan.acodec = "aac".to_owned();
+                  plan.src_vcodec = "h264".to_owned();
+                  plan.src_acodec = "aac".to_owned();
+                  plan.fps = 30.0; // fallback; MP4 demux timestamps are authoritative
+                  plan.src_fps = 30.0;
+                  plan.source_decodable = true;
+                  return plan;
+              }
+          '''
+
+
+          def git_blob_sha(data: bytes):
+              return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected one exact anchor, found {count}")
+              return text.replace(old, new, 1)
+
+
+          def patch_metadata(text):
+              text = replace_once(text, "fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str, prefer: Option<i64>) -> Option<Detail> {",
+                                  ONLINE_HELPERS + "fn fetch_full(sid: plx_plex::plex::ServerId, rk: &str, prefer: Option<i64>) -> Option<Detail> {",
+                                  "install online trailer helper")
+              old = '''    // The item's IDENTITY and the SHAPE of what came back — never its title. `scrub_local` runs'''
+              new = '''    // Attach the virtual trailer only if PMS provided no playable trailer.
+              // This is cheap and offline: the network call is performed on /watch later.
+              install_online_trailer(&mut d);
+              // The item's IDENTITY and the SHAPE of what came back — never its title. `scrub_local` runs'''
+              return replace_once(text, old, new, "detail trailer insertion")
+
+
+          def patch_plan(text):
+              old = '''    if env.direct_play_mode == DirectPlayMode::Disabled && rk.is_empty() {'''
+              return replace_once(text, old, PLAN_SNIFF + old, "native direct media route")
+
+
+          def patch_redirect(text):
+              # Search can involve two remote YouTube metadata requests. Allow a longer
+              # response-header wait ONLY for the Synology LAN /watch endpoint.
+              old = '''            CONNECT_TIMEOUT_MS,
+                      MEDIA_RECV_TIMEOUT_MS,
+                      MEDIA_SEND_TIMEOUT_MS,
+                      req.deadline,
+          '''
+              new = '''            CONNECT_TIMEOUT_MS,
+                      if cur.origin.host() == "192.168.0.2"
+                          && cur.origin.port() == 8765
+                          && cur.path.starts_with("/watch?") {
+                          45_000
+                      } else {
+                          MEDIA_RECV_TIMEOUT_MS
+                      },
+                      MEDIA_SEND_TIMEOUT_MS,
+                      req.deadline,
+          '''
+              return replace_once(text, old, new, "trailer resolve timeout")
+
+
+          def main():
+              parser = argparse.ArgumentParser()
+              parser.add_argument("source", type=Path, help="path to clean plx-native v0.9.0 checkout")
+              parser.add_argument("--check", action="store_true", help="verify tag and insertion points without writing")
+              args = parser.parse_args()
+              root = args.source.resolve()
+              paths = {key: root / key for key in EXPECTED}
+              raw = {}
+              for name, file in paths.items():
+                  data = file.read_bytes()
+                  sha = git_blob_sha(data)
+                  if sha != EXPECTED[name]:
+                      raise SystemExit(f"Refused: {name} has git blob SHA {sha}; expected {EXPECTED[name]} (v0.9.0). Work from a clean checkout.")
+                  raw[name] = data.decode("utf-8")
+              rendered = {
+                  "rust-modules/data/src/metadata.rs": patch_metadata(raw["rust-modules/data/src/metadata.rs"]),
+                  "rust-modules/media/src/route/plan.rs": patch_plan(raw["rust-modules/media/src/route/plan.rs"]),
+                  "rust-modules/net/src/stream_redirect.rs": patch_redirect(raw["rust-modules/net/src/stream_redirect.rs"]),
+              }
+              if args.check:
+                  print("OK: exact v0.9.0 source and all anchors matched; no files changed.")
+                  return
+              for name, patched in rendered.items():
+                  file = paths[name]
+                  file.write_text(patched, encoding="utf-8")
+                  print(f"Patched {name}")
+              print("Source modified. Rust build + LG device test are NOT yet performed.")
+
+          if __name__ == "__main__":
+              main()
+          PY
+          python3 "$RUNNER_TEMP/apply_native.py" . --check
+          python3 "$RUNNER_TEMP/apply_native.py" .
+          git diff --check
+
+      - name: Pinned Rust Compiler und webOS-Ziel installieren
+        uses: ./.github/actions/rust-toolchain
+
+      - name: LG webOS NDK einrichten
+        id: ndk
+        uses: ./.github/actions/webos-ndk
+
+      - name: Native Debug-IPK kompilieren
+        env:
+          WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
+          RELEASE: '1'
+          FLAVOR: debug
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)"
+          make ipk
+          ls -lh pkg/com.beb.plxnative.debug_*_arm.ipk
+
+      - name: Installierbare IPK als Artefakt bereitstellen
+        uses: actions/upload-artifact@v4
+        with:
+          name: plxnative-v0.9.0-de-trailer-debug-ipk
+          path: pkg/com.beb.plxnative.debug_*_arm.ipk
+          if-no-files-found: error
+          retention-days: 7
