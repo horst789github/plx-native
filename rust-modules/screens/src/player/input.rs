@@ -272,9 +272,8 @@ pub struct HudState {
     /// UP-from-the-top explicitly dismisses the HUD even while paused; any other player
     /// input clears it. Without this, paused() would force the HUD permanently visible.
     pub dismissed: bool,
-    /// Was the transport ON SCREEN when the key being handled arrived? Sampled by
-    /// `begin_fresh_press` at the top of every fresh press, and the ONLY honest answer to that
-    /// question by the time an arm runs.
+    /// Was the transport on screen when this bound key was handled? Sampled by
+    /// [`note_fresh_press`](Self::note_fresh_press) before the dismissal is cleared.
     ///
     /// The arm cannot re-derive it, because the same function clears [`dismissed`] one line later —
     /// and `dismissed` OUTRANKS the timer inside [`hud_visible`]. So a user who hid the transport
@@ -360,8 +359,8 @@ impl HudState {
     /// rather than two lines in its caller so that the order is a thing a test can hold still,
     /// instead of a convention a later edit can quietly transpose.
     ///
-    /// That caller is `note_global_press`, NOT `begin_fresh_press` as it once was, and the
-    /// difference is the point of the split: an unsupported key never gets here at all.
+    /// The bare player calls this in delivery order. The loop uses it for a press consumed
+    /// outside the player. Both callers check that the key is bound.
     ///
     /// **[`back_leaves_at_press`](Self::back_leaves_at_press) obeys the same order:** it reads
     /// [`exit_armed`](Self::exit_armed) and `dismissed` BEFORE the clear below, and the press then
@@ -371,9 +370,7 @@ impl HudState {
         self.visible_at_press = self.visible(ps, now, is_paused);
         self.back_leaves_at_press = self.exit_armed && self.dismissed;
         self.exit_armed = false;
-        // Any BOUND fresh key un-dismisses the HUD (UP-hide re-sets it). "Bound" and not "any" is
-        // the whole of `note_global_press`, the ONLY caller: an unsupported press never reaches
-        // here, so a colour button over a film no longer raises the transport.
+        // A bound fresh key un-dismisses the HUD. An UP-hide re-sets the dismissal.
         self.dismissed = false;
     }
 
@@ -421,9 +418,9 @@ impl HudState {
     /// Parking is only ever from REST: a user who walked to the Subtitles disc or an Info tab keeps
     /// their spot (and for Up Next thereby declines the countdown — the same one rule, read as a
     /// steady state one block below). `primary` is the occupant's own
-    /// ([`plx_appkit::player_hud::ControlSlot::primary_btn`]) — item 0 for a Skip pill, the
-    /// RIGHT-hand one for Up Next, where parking on item 0 would disarm the timer on the frame
-    /// after it armed.
+    /// ([`plx_appkit::player_hud::ControlSlot::primary_btn`]) — item 0 for a plain (Manual) Skip pill, the
+    /// RIGHT-hand one for Up Next and for the Automatic Skip pair (Watch, then the filled Skip, item 1),
+    /// where parking on item 0 would disarm the timer on the frame after it armed.
     pub fn raise_for_offer(&mut self, now: u32, primary: c_int) {
         self.extend(now, HUD_LINGER_MS);
         self.dismissed = false;

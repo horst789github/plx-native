@@ -1513,7 +1513,7 @@ fn a_retry_keeps_the_subtitle_offset_a_new_item_does_not() {
             direct_play_mode: DirectPlayMode::Auto,
         resume_ns: 0,
         candidate_purpose: CandidatePurpose::ReopenCurrent,
-        selection: Some((17, 23)),
+        selection: Some(HeldSelection { part_id: 0, audio_sid: 17, sub_sid: 23 }),
         sub_offset_ms: crate::player::subtitle_offset_ms(),
         suppress_enhancement: false,
         sub_mode: SubMode::Track,
@@ -1561,6 +1561,7 @@ fn a_refused_retry_keeps_its_position_and_full_request_for_the_next_quality() {
         ctx: "S01 E02".into(),
         preview: false,
         version: None,
+        show_rk: String::new(),
     };
     { let s = &mut ps; {
         s.request = Some(request.clone());
@@ -1576,7 +1577,7 @@ fn a_refused_retry_keeps_its_position_and_full_request_for_the_next_quality() {
             direct_play_mode: DirectPlayMode::Auto,
             resume_ns: 3_600_000_000_000,
             candidate_purpose: CandidatePurpose::ReopenCurrent,
-            selection: Some((17, 23)),
+            selection: Some(HeldSelection { part_id: 0, audio_sid: 17, sub_sid: 23 }),
             sub_offset_ms: 0,
             suppress_enhancement: false,
             sub_mode: SubMode::Track,
@@ -2610,13 +2611,34 @@ fn cold_audio_resolve_held(
     acodec: &str,
     tweak: impl FnOnce(&mut ResolveEnv, &mut plx_data::metadata::PlayingItem),
 ) -> (Plan, Vec<String>) {
+    cold_part_resolve_held(ps, COLD_PART, name, expected_requests, mde, audio, subs, acodec, tweak)
+}
+
+/// The Part every cold resolve plays unless it names another: an `.mkv`, a container Standard streams.
+#[cfg(feature = "devtriggers")]
+const COLD_PART: &str = "/library/parts/36013/1/file.mkv";
+
+/// [`cold_audio_resolve_held`] for the Part `part` (its container is part of what Standard decides).
+#[cfg(feature = "devtriggers")]
+#[allow(clippy::too_many_arguments)]
+fn cold_part_resolve_held(
+    ps: &crate::route::PlaybackSession,
+    part: &str,
+    name: &'static str,
+    expected_requests: usize,
+    mde: &'static [u8],
+    audio: Vec<plx_data::metadata::Stream>,
+    subs: Vec<plx_data::metadata::Stream>,
+    acodec: &str,
+    tweak: impl FnOnce(&mut ResolveEnv, &mut plx_data::metadata::PlayingItem),
+) -> (Plan, Vec<String>) {
     let (port, rx, server) = plan_pms(expected_requests, mde);
     let sid = plx_plex::plex::register_for_test(name, "127.0.0.1", port, "token", name);
     let mut env = ResolveEnv::snapshot(ps, plx_data::stores::metadata::MetadataStore::default().view(), sid, "rk-4k");
     let mut item = fourk_item_with_subs(sid, audio, subs);
     tweak(&mut env, &mut item);
     env.cached_item = Some(item);
-    let plan = build_stream(&plx_base::task::OffFrame::for_test(), "rk-4k", "/library/parts/36013/1/file.mkv", "hevc", acodec, &env);
+    let plan = build_stream(&plx_base::task::OffFrame::for_test(), "rk-4k", part, "hevc", acodec, &env);
     let requests = rx.recv_timeout(std::time::Duration::from_secs(15)).expect("PMS never saw the resolve");
     server.join().unwrap();
     plx_plex::plex::reset_servers_for_test();
@@ -3295,4 +3317,418 @@ fn the_converted_mark_reads_the_attempt_not_the_boot() {
     assert!(plx_platform::devcaps::caps().audio_supports("dts", 6), "the boot value is untouched");
     ps.direct_play_mode = DirectPlayMode::Forced;
     assert!(!audio_converted_by_server(&ps, "dts", 6, 48_000), "Forced Direct Play refuses instead of converting");
+}
+
+// ---- Settings > Playback engine > Experimental takes only what Standard would direct-play ----
+//
+// The viewer's opt-in qualifies the original file as a URL carrier for the TV's own pipeline
+// (`ProductQualifier`), and that pipeline plays what the file says: a video the caps cannot show, a
+// Dolby Vision layering the frozen decision refuses, or an audio codec the set cannot decode would play
+// with wrong colours or in silence and report nothing, so the handoff to Standard would never fire; a
+// container Standard has the server remux would skip that remux. Each case below is one cold resolve,
+// run as Standard and as Experimental through the production qualifier, and the Experimental plan is
+// Standard's. (The server's own direct-play decision is not one of the verdicts: the offer precedes it.)
+
+/// The production composition on an ACB display: nothing certified, `ProductQualifier`.
+#[cfg(feature = "devtriggers")]
+fn production_uri_port() -> crate::route::uri_preflight::ResolvePort {
+    crate::route::uri_preflight::ResolvePort::new(
+        crate::route::uri_preflight::ProductEvidence::unqualified_on(
+            plx_platform::tv::sink::VP_ACB, plx_playback_contract::uri::Binding::Acb),
+        std::sync::Arc::new(crate::route::uri_preflight::ProductQualifier))
+}
+
+/// [`cold_audio_resolve`] by a viewer whose Playback engine is `engine`, with the production URI port
+/// installed and the Part's own duration known (every URI qualification needs one).
+#[cfg(feature = "devtriggers")]
+fn uri_engine_resolve(
+    name: &'static str,
+    engine: plx_plex::plex::session::UriEngine,
+    expected_requests: usize,
+    mde: &'static [u8],
+    audio: Vec<plx_data::metadata::Stream>,
+    acodec: &str,
+    tweak: impl FnOnce(&mut ResolveEnv, &mut plx_data::metadata::PlayingItem),
+) -> (Plan, Vec<String>) {
+    uri_engine_part_resolve(COLD_PART, name, engine, expected_requests, mde, audio, acodec, tweak)
+}
+
+/// [`uri_engine_resolve`] of the Part `part`.
+#[cfg(feature = "devtriggers")]
+#[allow(clippy::too_many_arguments)]
+fn uri_engine_part_resolve(
+    part: &str,
+    name: &'static str,
+    engine: plx_plex::plex::session::UriEngine,
+    expected_requests: usize,
+    mde: &'static [u8],
+    audio: Vec<plx_data::metadata::Stream>,
+    acodec: &str,
+    tweak: impl FnOnce(&mut ResolveEnv, &mut plx_data::metadata::PlayingItem),
+) -> (Plan, Vec<String>) {
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    cold_part_resolve_held(&ps, part, name, expected_requests, mde, audio, Vec::new(), acodec, |env, item| {
+        env.uri_engine = engine;
+        env.uri_preflight_port = Some(production_uri_port());
+        item.duration_ms = Some(7_200_000);
+        tweak(env, item);
+    })
+}
+
+/// The wire a resolve made, without its per-play session ids and in a stable order (the PlayQueue POST
+/// is asked beside the rest of the plan).
+#[cfg(feature = "devtriggers")]
+fn wire_shape(requests: &[String]) -> Vec<String> {
+    let mut shape: Vec<String> = requests.iter()
+        .map(|line| line.split('?').next().unwrap_or(line).to_owned()).collect();
+    shape.sort();
+    shape
+}
+
+/// Resolve the same file as Standard (`UriEngine::Off`) and as Experimental (`On`) and require the two
+/// plans to be one: no URI source, the same route, the same wire. Returns Standard's plan and requests
+/// for the caller to say what Standard did.
+///
+/// `expected_requests` is the WHOLE wire Standard makes: the mock PMS stops at that many, so a smaller
+/// count compares only whichever requests raced in first (the PlayQueue POST is asked beside the
+/// selection PUT), and the same file then passes or fails at random.
+#[cfg(feature = "devtriggers")]
+fn experimental_plays_as_standard(
+    name: &'static str,
+    expected_requests: usize,
+    mde: &'static [u8],
+    audio: impl Fn() -> Vec<plx_data::metadata::Stream>,
+    acodec: &str,
+    tweak: impl Fn(&mut ResolveEnv, &mut plx_data::metadata::PlayingItem),
+) -> (Plan, Vec<String>) {
+    experimental_plays_as_standard_in_part(COLD_PART, name, expected_requests, mde, audio, acodec, tweak)
+}
+
+/// [`experimental_plays_as_standard`] for the Part `part`.
+#[cfg(feature = "devtriggers")]
+#[allow(clippy::too_many_arguments)]
+fn experimental_plays_as_standard_in_part(
+    part: &str,
+    name: &'static str,
+    expected_requests: usize,
+    mde: &'static [u8],
+    audio: impl Fn() -> Vec<plx_data::metadata::Stream>,
+    acodec: &str,
+    tweak: impl Fn(&mut ResolveEnv, &mut plx_data::metadata::PlayingItem),
+) -> (Plan, Vec<String>) {
+    use plx_plex::plex::session::UriEngine;
+    let (standard, standard_wire) = uri_engine_part_resolve(part, name, UriEngine::Off,
+        expected_requests, mde, audio(), acodec, &tweak);
+    let (experimental, experimental_wire) = uri_engine_part_resolve(part, name, UriEngine::On,
+        expected_requests, mde, audio(), acodec, &tweak);
+    assert!(standard.uri_original.is_none() && !standard.uri_source_ready,
+        "Standard never carries a URI source");
+    assert!(experimental.uri_original.is_none() && !experimental.uri_source_ready,
+        "an original Standard would not direct-play is not offered to URI");
+    assert_eq!(wire_shape(&experimental_wire), wire_shape(&standard_wire),
+        "Experimental asks the server what Standard asks");
+    assert_eq!(experimental.verdict, standard.verdict);
+    assert_eq!((experimental.contract.remux, experimental.contract.no_video_copy),
+        (standard.contract.remux, standard.contract.no_video_copy));
+    assert_eq!(experimental.url.contains("/video/:/transcode/"), standard.url.contains("/video/:/transcode/"),
+        "the same kind of URL: {} / {}", experimental.url, standard.url);
+    assert_eq!((experimental.source_decodable, experimental.src_dv_decision),
+        (standard.source_decodable, standard.src_dv_decision));
+    (standard, standard_wire)
+}
+
+/// The control: a file Standard direct-plays IS offered to URI once the viewer opted in, and only then.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn experimental_offers_an_original_that_standard_direct_plays() {
+    use plx_plex::plex::session::UriEngine;
+    let ac3 = || vec![cold_track(1, "ac3", "eng", true, "")];
+    let (standard, standard_wire) = uri_engine_resolve("uri-optin-control-standard", UriEngine::Off, 2,
+        MDE_DIRECTPLAY, ac3(), "ac3", |_, _| {});
+    assert!(standard.uri_original.is_none(), "Standard is Feed");
+    assert!(standard.url.contains("/library/parts/36013/"), "Standard direct-plays it: {}", standard.url);
+    assert!(request_with(&standard_wire, "hasMDE=1").len() == 1, "{standard_wire:?}");
+    let (experimental, wire) = uri_engine_resolve("uri-optin-control-on", UriEngine::On, 1,
+        MDE_DIRECTPLAY, ac3(), "ac3", |_, _| {});
+    assert!(experimental.uri_original.is_some() && experimental.uri_source_ready,
+        "an original Standard direct-plays is the one the opt-in carries");
+    assert!(request_with(&wire, "/decision?").is_empty(),
+        "the URI offer is made before any server decision: {wire:?}");
+}
+
+/// The event-log line a tester reads when Experimental did not take a play, and the plan that carries
+/// it: the reason is the FIRST check that said no, and only an opted-in viewer is told.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn an_opted_in_auto_play_on_a_remote_link_says_why_the_original_stayed_in_standard() {
+    use plx_plex::plex::session::UriEngine;
+    let (plan, _) = uri_engine_resolve("uri-decline-auto-remote", UriEngine::On, 4, MDE_DIRECTPLAY,
+        vec![cold_track(1, "ac3", "eng", true, "")], "ac3", |env, _| {
+            env.quality = Quality::Auto;
+            plx_plex::plex::client_for(env.sid).expect("registered")
+                .set_link(plx_plex::plex::probe::Location::Remote);
+        });
+    assert!(plan.uri_original.is_none() && !plan.uri_source_ready, "Auto on a remote link stays in Standard");
+    assert_eq!(plan.uri_decline, Some(crate::route::uri_preflight::UriDecline::AutoOnNonLocalLink));
+    assert_eq!(uri_decline_line(UriEngine::On, &plan).as_deref(),
+        Some("uri: original declined (quality Auto on a link that is not local; set quality to Original)"));
+    assert_eq!(uri_decline_line(UriEngine::Off, &plan), None, "Standard has nothing to explain");
+}
+
+/// The guards that skip qualification altogether leave a reason too, and a play the URI engine took
+/// says nothing.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn the_guards_that_skip_uri_qualification_leave_a_reason_and_a_qualified_play_none() {
+    use crate::route::uri_preflight::{UriDecline, UriOfferEligibility};
+    use plx_plex::plex::session::UriEngine;
+    let ac3 = || vec![cold_track(1, "ac3", "eng", true, "")];
+    let (plan, _) = uri_engine_resolve("uri-decline-no-port", UriEngine::On, 2, MDE_DIRECTPLAY, ac3(),
+        "ac3", |env, _| env.uri_preflight_port = None);
+    assert_eq!(plan.uri_decline, Some(UriDecline::NoPort));
+    assert_eq!(uri_decline_line(UriEngine::On, &plan).as_deref(),
+        Some("uri: original declined (no URI engine in this build or boot)"));
+    let (plan, _) = uri_engine_resolve("uri-decline-not-offered", UriEngine::On, 2, MDE_DIRECTPLAY, ac3(),
+        "ac3", |env, _| env.uri_offers = UriOfferEligibility { original: false, ..UriOfferEligibility::ALL });
+    assert_eq!(plan.uri_decline, Some(UriDecline::NotOffered));
+    let (plan, _) = uri_engine_resolve("uri-decline-unresolved-pick", UriEngine::On, 2, MDE_DIRECTPLAY, ac3(),
+        "ac3", |env, _| env.audio_sid = 9_999);
+    assert_eq!(plan.uri_decline, Some(UriDecline::TrackPickUnresolved));
+    let (plan, _) = uri_engine_resolve("uri-decline-qualified", UriEngine::On, 1, MDE_DIRECTPLAY, ac3(),
+        "ac3", |_, _| {});
+    assert!(plan.uri_original.is_some());
+    assert_eq!(plan.uri_decline, None);
+    assert_eq!(uri_decline_line(UriEngine::On, &plan), None, "a qualified play says nothing");
+}
+
+/// A video codec the caps do not direct-play (here HEVC on a set whose table lists no HEVC decoder).
+#[test]
+#[cfg(feature = "devtriggers")]
+fn experimental_keeps_a_video_codec_the_caps_do_not_direct_play_in_standard() {
+    let (standard, _) = experimental_plays_as_standard("uri-optin-video", 3, MDE_TRANSCODE_VIDEO,
+        || vec![cold_track(1, "ac3", "eng", true, "")], "ac3", |env, _| {
+            env.caps = std::sync::Arc::new(plx_platform::devcaps::Caps {
+                hevc: false, ..plx_platform::devcaps::Caps::assumed() });
+        });
+    assert!(!standard.source_decodable, "the premise: Standard refuses this video");
+}
+
+/// A raster beyond the caps' bound is the same refusal as an unsupported codec.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn experimental_keeps_a_raster_beyond_the_caps_bound_in_standard() {
+    let (standard, _) = experimental_plays_as_standard("uri-optin-raster", 3, MDE_TRANSCODE_VIDEO,
+        || vec![cold_track(1, "ac3", "eng", true, "")], "ac3", |env, _| {
+            env.caps = std::sync::Arc::new(plx_platform::devcaps::Caps {
+                hevc_max: (1920, 1088), ..plx_platform::devcaps::Caps::assumed() });
+        });
+    assert!(!standard.source_decodable, "the premise: Standard refuses a 4K video on a 1080p bound");
+}
+
+/// The reviewer's failing case: a Profile 5 file on a set without Dolby Vision, DV mode Auto. Standard
+/// refuses direct play (`frozen_dv_decision`) and the server transcodes; URI would send the original
+/// to a pipeline that shows its IPT-PQ in the wrong colours and never says so.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn experimental_keeps_a_profile_5_file_on_a_set_without_dolby_vision_in_standard() {
+    let (standard, _) = experimental_plays_as_standard("uri-optin-p5", 3, MDE_TRANSCODE_COPY,
+        || vec![cold_track(1, "ac3", "eng", true, "")], "ac3", |env, item| {
+            env.dv_capability = plx_platform::devcaps::dv::DvCapability::Unsupported;
+            env.dolby_vision_mode = plx_plex::plex::session::DolbyVisionMode::Auto;
+            item.dovi = p5();
+        });
+    assert!(standard.src_dv_decision.presentation.refusal().is_some(),
+        "the premise: the frozen decision refuses a Profile 5 here");
+    assert!(!standard.source_decodable);
+    assert!(standard.url.contains("/video/:/transcode/"), "Standard has the server convert it: {}", standard.url);
+}
+
+/// A Profile 8 file on the same set plays its HDR10 base layer: the frozen decision admits it, so
+/// Standard direct-plays it and the opt-in carries it with its Dolby Vision record certified.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn experimental_offers_a_profile_8_file_whose_base_layer_the_frozen_decision_admits() {
+    use plx_plex::plex::session::UriEngine;
+    let (plan, _) = uri_engine_resolve("uri-optin-p8", UriEngine::On, 1, MDE_DIRECTPLAY,
+        vec![cold_track(1, "ac3", "eng", true, "")], "ac3", |env, item| {
+            env.dv_capability = plx_platform::devcaps::dv::DvCapability::Unsupported;
+            item.dovi = p8();
+        });
+    let known = plan.uri_original.as_ref().expect("an admitted base layer is offered");
+    assert_eq!(known.certified_dolby_vision, Some(p8()));
+    assert!(plan.source_decodable && plan.src_dv_decision.presentation.refusal().is_none());
+}
+
+/// An audio codec Standard does not direct-play (DTS on a table with no DTS row): the server converts
+/// the track, and a URI pipeline with no decoder for it would play the picture in silence.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn experimental_keeps_an_audio_codec_the_set_cannot_decode_in_standard() {
+    let (standard, _) = experimental_plays_as_standard("uri-optin-dts", 4, MDE_TRANSCODE_COPY,
+        || vec![cold_track(1, "dca", "eng", true, "")], "dca", |_, _| {});
+    assert!(standard.source_decodable, "the premise: the video is fine, the audio is the refusal");
+    assert!(standard.url.contains("/video/:/transcode/"),
+        "the premise: Standard has the server convert the DTS: {}", standard.url);
+}
+
+/// Standard may decode a codec in the APP (the lossy rows, `Caps::app_lossy_in_force`), which the TV's
+/// own pipeline cannot: that file direct-plays in Standard and must not be handed to URI.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn experimental_keeps_audio_only_the_app_decodes_in_standard() {
+    let (standard, _) = experimental_plays_as_standard("uri-optin-app-decode", 2, MDE_DIRECTPLAY,
+        || vec![cold_track(1, "dca", "eng", true, "")], "dca", |env, _| {
+            env.caps = std::sync::Arc::new(plx_platform::devcaps::Caps::assumed().with_app_lossy());
+        });
+    assert!(standard.url.contains("/library/parts/36013/"),
+        "the premise: Standard direct-plays it by decoding in the app: {}", standard.url);
+}
+
+/// A container Standard does not stream (anything but .mkv/.mp4/.m4v): `part_is_streamable` sends it to
+/// a server remux into progressive MKV, and a file the pipeline would take whole as the original never
+/// goes through that. Here an `.avi` whose video, Dolby Vision and audio all direct-play: the container
+/// is the only refusal.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn experimental_keeps_a_container_standard_does_not_stream_in_standard() {
+    let (standard, _) = experimental_plays_as_standard_in_part("/library/parts/36013/1/file.avi",
+        "uri-optin-avi", 3, MDE_DIRECTPLAY, || vec![cold_track(1, "ac3", "eng", true, "")], "ac3", |_, _| {});
+    assert!(standard.source_decodable, "the premise: the video is fine, the container is the refusal");
+    assert!(standard.url.contains("/video/:/transcode/"),
+        "the premise: Standard has the server remux the .avi: {}", standard.url);
+}
+
+/// The container control: an `.mp4` is one Standard streams, so the opt-in carries it.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn experimental_offers_an_mp4_original_that_standard_streams() {
+    use plx_plex::plex::session::UriEngine;
+    let (plan, _) = uri_engine_part_resolve("/library/parts/36013/1/file.mp4", "uri-optin-mp4",
+        UriEngine::On, 1, MDE_DIRECTPLAY, vec![cold_track(1, "ac3", "eng", true, "")], "ac3", |_, _| {});
+    assert!(plan.uri_original.is_some() && plan.uri_source_ready,
+        "a streamable container is the one the opt-in carries");
+}
+
+
+/// Exercise the production queue/publication runner and the exact outcome consumed by
+/// the demux session. Refusing a private candidate must leave the active route usable.
+#[test]
+fn cancelled_abr_candidate_preserves_active_route_but_queue_failures_stay_terminal() {
+    use crate::adaptive::{Coordinator, QueueTrace, TrialRunner};
+    use plx_playback_contract::adaptive::{
+        AdaptiveProgress, CandidateFenceError, CandidateFencePort, CandidateMediaPort,
+        CommitReadout, FeedAction, FeedFailure, FeedObservation, FeedPort, PublicationGate,
+        TrialId, TrialObservation, TrialPhase, TrialProtocol,
+    };
+    use plx_playback_contract::{AttemptId, SourceKey};
+
+    struct Port {
+        refusal: Option<CandidateFenceError>,
+        queued: usize,
+    }
+    impl FeedPort for Port {
+        type Locator = String;
+        fn bind_source(&mut self, _: SourceKey, _: String) { panic!("already staged"); }
+        fn step(&mut self, action: FeedAction) -> FeedObservation {
+            let FeedAction::QueueStaged { trial } = action else { panic!("unexpected action"); };
+            self.queued += 1;
+            FeedObservation::Failed { trial, failure: FeedFailure::Protocol }
+        }
+    }
+    impl CandidateFencePort for Port {
+        type Fence = ();
+        fn arm(&mut self, _: u64) -> Result<(), CandidateFenceError> {
+            self.refusal.map_or(Ok(()), Err)
+        }
+        fn settle(&mut self, _: ()) { panic!("no published candidate"); }
+    }
+    impl CandidateMediaPort for Port {
+        fn candidate_declared_bps(&self) -> Option<u64> { Some(2_000_000) }
+        fn stage_queued_timeline(&mut self) -> bool { panic!("must not replace timeline"); }
+        fn promote_candidate(&mut self, _: &CommitReadout) -> bool { panic!("must not promote"); }
+        fn publication_gate(&mut self) -> &mut dyn PublicationGate { panic!("must not publish"); }
+    }
+
+    let mut ps = PlaybackSession::IDLE;
+    let _serial = fresh_registry(&mut ps);
+    let rung = crate::abr::Rung::P480;
+    install_active_hls("active", "http://fixture.invalid/active.m3u8", rung);
+    let ticket = worker_ticket();
+    let control = HlsAbrControl {
+        trace_generation: 0, sid: ServerId::UNSET, rating_key: "1".into(), media_index: 0,
+        logical_session: "active".into(), audio_stream_id: 0, subtitle_stream_id: 0,
+        seconds_per_segment: 2, caps: plx_platform::devcaps::caps(), initial_rung: rung,
+        initial_observed: None, fixture_base: "http://fixture.invalid".into(),
+        original_probe_part: String::new(), original_source_kbps: 0,
+        catalog: crate::abr::HlsActuatorCatalog::measured(), prior: None,
+        history: crate::abr::TransitionHistory::default(),
+        original_features: crate::abr::SourceFeatures::default(), original_refused: false,
+    };
+    let mut coordinator = Coordinator::start((control, ticket.clone()).into(), None);
+    let candidate = PrimedHls {
+        url: "http://fixture.invalid/candidate.m3u8".into(), encoder_session: "candidate".into(),
+    };
+    // Let real active-stream observations create the pending upgrade; cancellation
+    // must clear it or later rounds will remain stuck behind the abandoned proposal.
+    let mut proposal = None;
+    for tick in 1..=20 {
+        let buffer = plx_playback_contract::adaptive::BufferFact {
+            playback_ms: tick * 2_000, video_tail_ms: tick * 2_000 + 60_000,
+            audio_tail_ms: None, audio_expected: false,
+        };
+        let acquisition = plx_playback_contract::adaptive::Acquisition {
+            bytes: 180_000, active_us: 100_000, total_us: 100_000,
+            duration: std::time::Duration::from_secs(2), width: 854, height: 480,
+            declared_bps: 720_000,
+        };
+        let active = coordinator.begin_active_quantum(
+            acquisition, || buffer, false, true, tick as u64 * 2_000,
+        ).unwrap();
+        let (_, round, _) = active.refresh(buffer).observe(
+            &mut coordinator, Some(2_000), tick as u64 * 2_000, false,
+        );
+        if let crate::abr::Decision::Prime(value) = round.decision {
+            proposal = Some(value);
+            break;
+        }
+    }
+    let proposal = proposal.expect("healthy active stream proposes an upgrade");
+    assert_eq!(coordinator.telemetry().pending, Some(proposal));
+    let sample = crate::abr::SegmentSample::new(200_000, 100_000, 100_000, 2_000,
+        crate::abr::BufferSnapshot {
+            playback: crate::abr::MediaTimeMs(1_000),
+            video_tail: crate::abr::MediaTimeMs(10_000),
+            audio_tail: None, audio_expected: false,
+        }).unwrap();
+    for (refusal, expected, trace) in [
+        (Some(CandidateFenceError::Superseded), AdaptiveProgress::Continue, "candidate_superseded"),
+        (Some(CandidateFenceError::Aborted), AdaptiveProgress::Aborted, "aborted"),
+        (Some(CandidateFenceError::Overlap), AdaptiveProgress::Failed("overlapping HLS candidate publication"), "publication_overlap"),
+        (Some(CandidateFenceError::Exhausted), AdaptiveProgress::Failed("HLS candidate generation exhausted"), "publication_generation_exhausted"),
+        (None, AdaptiveProgress::Failed("adaptive feed queue protocol violation"), "commit_feed_failed"),
+    ] {
+        let trial = TrialId::new(AttemptId::new(1, 1), 1);
+        let mut protocol = TrialProtocol::new(trial);
+        protocol.observe(trial, TrialObservation::Prepared).unwrap();
+        protocol.observe(trial, TrialObservation::FirstAcquired).unwrap();
+        let mut port = Port { refusal, queued: 0 };
+        let mut traces = Vec::new();
+        let mut runner = TrialRunner::new(&mut port, &mut protocol);
+        let outcome = runner.queue_publish(&mut coordinator, 1, &candidate, proposal, sample,
+            crate::abr::ObservedHlsVariant::new(2_000_000, 1280, 720).unwrap(), || 1_000,
+            |event| if let QueueTrace::Finish(reason) = event { traces.push(reason); });
+        assert_eq!(outcome.into_publication(), Err(expected));
+        drop(runner);
+        assert_eq!(traces, [trace]);
+        assert_eq!(port.queued, usize::from(refusal.is_none()));
+        assert!(is_worker_ticket_current(&ticket));
+        assert_eq!(coordinator.current(), rung);
+        assert_eq!(active_hls().unwrap().1.url, "http://fixture.invalid/active.m3u8");
+        if refusal == Some(CandidateFenceError::Superseded) {
+            assert_eq!(protocol.phase(), TrialPhase::Ended);
+            assert_eq!(coordinator.telemetry().pending, None,
+                "cancelled upgrade must not wedge future adaptive rounds");
+        }
+    }
 }

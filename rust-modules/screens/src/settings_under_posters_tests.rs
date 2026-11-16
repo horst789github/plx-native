@@ -620,16 +620,36 @@ fn the_picture_shows_each_posters_year_only_while_the_sort_value_row_has_focus()
 #[test]
 fn reset_restores_the_default_and_is_inert_at_the_default() {
     let _guard = plx_base::testlock::serial();
+    let reset_disabled = |page: &UnderPostersPage| page.form.table.sections.last().unwrap().rows[0].disabled;
     {
         let _live = Live::set(UnderPosters { title: true, details: parts(&[P::Genre]), show_details: DetailParts::NONE, sort_value: false });
         let mut page = UnderPostersPage::new(EntryId(0));
+        assert!(!reset_disabled(&page), "a changed value can be reset");
         let (asked, _reply) = write_request(activate(&mut page, UpId::Reset)).expect("reset writes");
         assert_eq!(asked, UnderPosters::DEFAULT);
+        assert!(reset_disabled(&page), "the reset action is unavailable as soon as it shows the defaults");
     }
     let _live = Live::set(UnderPosters::DEFAULT);
     let mut page = UnderPostersPage::new(EntryId(0));
+    assert!(reset_disabled(&page), "the default value presents the shared disabled row");
     assert!(write_request(activate(&mut page, UpId::Reset)).is_none(), "nothing to reset");
     assert!(!page.state.busy);
+}
+
+#[test]
+fn the_show_preview_supplies_examples_for_missing_facts() {
+    let _en = language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+    let tv = PmsMovie {
+        kind: 1,
+        title: "Family Stories".into(),
+        child_count: 2,
+        leaf_count: Some(12),
+        viewed_leaf_count: Some(5),
+        ..Default::default()
+    };
+    let value = up(true, &[], &[P::Year, P::Seasons, P::Genre, P::AgeRating]);
+    assert_eq!(picture_lines(value, PosterKind::Show, Some(&tv), false),
+        [Some("Family Stories".into()), Some("2019 · 2 seasons · Drama · TV-14".into())]);
 }
 
 #[test]
@@ -748,7 +768,9 @@ fn the_root_page_reads_the_stored_setting_into_its_row() {
     let _en = language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
     let stored = UnderPosters { title: true, details: parts(&[P::Genre]), show_details: DetailParts::NONE, sort_value: false };
     let _live = Live::set(stored);
-    let page = RootPage::new(EntryId(0), test_support::cx(None).views.directory);
+    let mut inputs = crate::registry::capture_fixture();
+    inputs.preferences = Some(plx_plex::plex::session::ProfilePrefs { under_posters: Some(stored), ..Default::default() });
+    let page = RootPage::new(EntryId(0), test_support::cx(None).views.directory, &inputs);
     assert_eq!(page.state.under_posters, stored);
 }
 
@@ -905,6 +927,109 @@ fn both_kinds_are_sourced_when_the_last_opened_library_lists_only_one() {
     let c = cx_with(None, shelf_only.view());
     let titles: Vec<&str> = preview_posters(&c).iter().map(|m| m.title.as_str()).collect();
     assert_eq!(titles, vec!["Other film", "Sitcom"]);
+}
+
+/// Both libraries listed, a show library never opened: the cache holds a movie and no show.
+fn movies_only_directory() -> plx_data::stores::browse::DirectorySnapshot {
+    use plx_data::browse::SecKind;
+    use plx_data::stores::browse::{SectionView, SrcRow};
+    let sid = plx_plex::plex::ServerId::from_raw(0);
+    let section = |key, kind| SectionView { sid: Some(sid), key, kind, row: SrcRow { pinned: true, ..Default::default() } };
+    plx_data::stores::browse::DirectorySnapshot::fixture(7, 0, vec![section(1, SecKind::Movie), section(2, SecKind::Show)])
+        .with_sample([poster("Alpha", 2000, "Noir")].into())
+}
+
+/// The Browse hub reads `effects` asks for, as the `(epoch, section key)` of each.
+fn hub_asks(effects: Vec<Stamped<InnerHost>>) -> Vec<(u32, i64)> {
+    use plx_data::stores::{StoreCmd, StoreId};
+    use plx_data::stores::browse::{BrowseCmd, LibraryWork};
+    effects.into_iter().filter_map(|e| match e.fx {
+        Fx::App(AppFx::Store(StoreId::Browse, StoreCmd::Browse(BrowseCmd::Addressed {
+            target, work: LibraryWork::Hubs { may_publish: true } }))) => Some((target.epoch, target.section)),
+        _ => None,
+    }).collect()
+}
+
+fn step_page(page: &mut UnderPostersPage, ev: ScreenEvent<InnerHost>, c: &Cx<'_, InnerHost>) -> Vec<Stamped<InnerHost>> {
+    let mut out = Vec::new();
+    let mut present = Present::new();
+    page.step(&ev, c, &mut Effects::new(&mut out, MachineId::Instance(InstanceId(0)), &mut present));
+    out
+}
+
+/// Does `effects` pump the Browse store (`StoreWork::Browse`)?
+fn pumps_browse(effects: &[Stamped<InnerHost>]) -> bool {
+    effects.iter().any(|e| matches!(&e.fx, Fx::App(AppFx::StoreWork(plx_data::stores::StoreWork::Browse))))
+}
+
+fn tick_of(dt_ms: u32) -> ScreenEvent<InnerHost> {
+    ScreenEvent::Tick(Tick { ms: 0, dt_us: dt_ms * 1000 })
+}
+
+/// **A show tile is never left art-less only because the show library was not opened yet**: a kind
+/// the cache has no poster of is asked for as the hubs of that kind's library (a read of its shelves
+/// that does not switch the library the user is on), with the store pumped, on every tick until the
+/// poster is there (a landed read is staged and only a later `Hubs` ask commits it, and nothing
+/// lands unpumped). A kind that is cached, or whose library's shelves the store has published, is
+/// not asked for.
+#[test]
+fn a_kind_with_no_cached_poster_is_asked_for_until_it_arrives_or_its_shelves_are_published() {
+    use plx_data::browse::SecKind;
+    let _guard = plx_base::testlock::serial();
+    let snapshot = movies_only_directory();
+    let c = cx_with(None, snapshot.view());
+    assert_eq!(preview_posters(&c).len(), 1, "premise: a movie and no show is cached");
+    let mut page = UnderPostersPage::new(EntryId(0));
+    let mount = step_page(&mut page, ScreenEvent::Mount, &c);
+    assert!(pumps_browse(&mount), "nothing lands unless the store is pumped");
+    assert_eq!(hub_asks(mount), vec![(7, 2)], "the show library's shelves, and only that kind");
+    let tick = step_page(&mut page, tick_of(16), &c);
+    assert_eq!(hub_asks(tick), vec![(7, 2)], "asked again: the landed read is committed by the next ask");
+    // Once the show is cached: nothing asked, nothing pumped.
+    let full = movies_only_directory().with_shelf_sample([show("Sitcom", 2011, "Comedy")].into());
+    let c2 = cx_with(None, full.view());
+    assert_eq!(preview_posters(&c2).len(), 2);
+    let tick = step_page(&mut page, tick_of(16), &c2);
+    assert!(!pumps_browse(&tick));
+    assert!(hub_asks(tick).is_empty());
+    // A library whose shelves are published and hold no show is answered: no more asking, however
+    // long that took (there is no timer to run out before a slow server answers).
+    let answered = movies_only_directory().with_kind_shelves_published(SecKind::Show);
+    let c3 = cx_with(None, answered.view());
+    let tick = step_page(&mut page, tick_of(16), &c3);
+    assert!(!pumps_browse(&tick));
+    assert!(hub_asks(tick).is_empty());
+}
+
+/// The Settings root draws the same picture while its Under posters row has focus, and asks for the
+/// missing poster then and only then, and only while it is the page on top (the pushed Under
+/// posters page asks for itself, and the store must not be pumped twice a frame).
+#[test]
+fn the_settings_root_asks_for_the_missing_poster_only_on_its_under_posters_row_and_on_top() {
+    use plx_ui::form::FormId;
+    let _guard = plx_base::testlock::serial();
+    // The Libraries section (and the Under posters row in it) is there only for a signed-in account.
+    let _session = multi_user_session("under-posters-root-ask");
+    let snapshot = movies_only_directory();
+    let mut root = RootPage::new(EntryId(0), snapshot.view(), &crate::registry::capture_fixture());
+    let on = |elem: u32| Some(FocusKey { entry: EntryId(0), elem });
+    let tick = |root: &mut RootPage, focus| {
+        let c = cx_with(focus, snapshot.view());
+        let mut out = Vec::new();
+        let mut present = Present::new();
+        root.step(&tick_of(16), &c, &mut Effects::new(&mut out, MachineId::Instance(InstanceId(0)), &mut present));
+        out
+    };
+    let under = RootId::UnderPosters.key().0;
+    form_focus(&mut root.form, RootId::Favourites.key().0);
+    assert!(hub_asks(tick(&mut root, on(RootId::Favourites.key().0))).is_empty(), "another row: nothing asked");
+    form_focus(&mut root.form, under);
+    assert_eq!(root.form.selected_id(), Some(&RootId::UnderPosters), "premise: the row is selected");
+    let asked = tick(&mut root, on(under));
+    assert!(pumps_browse(&asked));
+    assert_eq!(hub_asks(asked), vec![(7, 2)], "the Under posters row asks for the show library's shelves");
+    let buried = tick(&mut root, Some(FocusKey { entry: EntryId(1), elem: 0 }));
+    assert!(hub_asks(buried).is_empty(), "a page pushed over the root asks for itself: the root stays quiet");
 }
 
 #[test]
@@ -1114,9 +1239,9 @@ fn the_picture_paints_into_the_slot_it_is_handed() {
     for ((_, a), (_, b)) in runs.iter().zip(at(moved).iter()) {
         assert!((b.x - a.x - 123.0).abs() < 0.01 && (b.y - a.y - 45.0).abs() < 0.01, "the picture follows its slot: {a:?} -> {b:?}");
     }
-    // the lowest ink, a title over its details, still ends inside the slot
-    let floor = slot.y + PICTURE_TILE_TOP + PICTURE_TILE_H + PICTURE_LINE_GAP + PICTURE_LINE_STEP + PICTURE_LINE_H;
-    assert!(floor <= slot.y + slot.h, "tiles, captions and both lines end at {floor}, the slot's floor is {}", slot.y + slot.h);
+    // The title plus the longest details block still ends inside the slot.
+    let floor = tile_bottom + PICTURE_LINE_GAP + PICTURE_LINE_STEP * PICTURE_DETAIL_LINES as f32 + PICTURE_LINE_H;
+    assert!(floor <= slot.y + slot.h, "preview ends at {floor}, the slot's floor is {}", slot.y + slot.h);
 }
 
 /// With Title on the title stands above the details, in bold, on each tile.
@@ -1161,68 +1286,39 @@ fn the_kind_captions_wear_the_section_header_look_under_every_setting() {
     }
 }
 
-/// **A details line is ONE line, ending in an ellipsis when it is wider than its tile**
-/// (`DetailsByKind`: "one line, never wrapped"; the mockup's wrap is its missing `nowrap`): for every
-/// kind, every combination of up to four of its parts, with the title on, in every shipped language,
-/// the picture draws exactly one run per line, none wider than the 250 px tile, the line untouched
-/// when it fits and ended with an ellipsis when it does not. The widest English movie line is
-/// "2024 · 1h 52m · Drama · 4K · HDR".
+/// All combinations of the preview's examples fit across the two detail lines in every locale.
 #[test]
-fn a_details_line_is_one_line_and_ends_in_an_ellipsis_when_wider_than_its_tile() {
+fn the_preview_draws_every_selected_example_inside_its_caption_column() {
     use plx_machine::machine::Measure;
     let _guard = plx_base::testlock::serial();
     let slot = RouteLayout::settings_page().picture_slot();
-    let size = theme::size::CAPTION;
-    let width = |text: &str, bold: bool| ShippedMeasure.width_str(text, size, bold);
+    let normalize = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out = Vec::new();
-    let mut widest: Option<(String, f32)> = None;
-    let mut elided = 0;
     for language in SHIPPED {
         let _lang = language_on_this_thread_for_test(language);
-        let tag = language.tag();
-        for kind in [PosterKind::Movie, PosterKind::Show] {
+        for (i, kind) in [PosterKind::Movie, PosterKind::Show].into_iter().enumerate() {
+            let centre = slot.x + PICTURE_TILE_STEP * i as f32 + PICTURE_TILE_W * 0.5;
             for set in subsets(kind.offered()) {
-                let value = kind.with_parts(UnderPosters { title: true, sort_value: false, ..UnderPosters::DEFAULT }, set);
-                let wanted = lines_of(value, &kind_sample(kind));
+                let value = kind.with_parts(UnderPosters { title: true, ..UnderPosters::DEFAULT }, set);
+                let [_, details] = plx_ui::caption_policy::caption_lines(
+                    &caption_policy_of(value), &kind_sample(kind), plx_platform::i18n::current(),
+                );
                 let picture = RootPicture { value, posters: &[], sorted: false, opacity: [1.0, 1.0] };
-                let runs = plx_ui::draw_census::capture_text(|| {
-                    plx_gfx::gfx::without_frame_clear(|| plx_ui::follow_copy::PictureSlot::draw(&picture, plx_ui::Painter::recording(), slot, &ShippedMeasure));
+                let runs = plx_ui::draw_census::capture_runs(|| {
+                    plx_gfx::gfx::without_frame_clear(|| plx_ui::follow_copy::PictureSlot::draw(
+                        &picture, plx_ui::Painter::recording(), slot, &ShippedMeasure,
+                    ));
                 });
-                // [movie caption, its lines.., show caption, its lines..]: this kind's own tile
-                let own: Vec<&str> = {
-                    let all: Vec<&str> = runs.iter().map(|(t, _)| t.as_str()).collect();
-                    let n_movie = lines_of(value, &kind_sample(PosterKind::Movie)).iter().flatten().count();
-                    match kind {
-                        PosterKind::Movie => all[1..1 + n_movie].to_vec(),
-                        PosterKind::Show => all[1 + n_movie + 1..].to_vec(),
-                    }
-                };
-                let present: Vec<&String> = wanted.iter().flatten().collect();
-                if own.len() != present.len() {
-                    out.push(format!("{tag} {kind:?} {set:?}: {} lines drawn for {} wanted: {own:?}", own.len(), present.len()));
-                    continue;
-                }
-                for (n, (drawn, natural)) in own.iter().zip(present).enumerate() {
-                    let bold = n == 0 && wanted[0].is_some();
-                    let fits = width(natural, bold) <= PICTURE_TILE_W;
-                    if fits && drawn != natural {
-                        out.push(format!("{tag} {kind:?} {set:?}: {natural:?} fits its tile but was drawn {drawn:?}"));
-                    }
-                    if !fits {
-                        elided += 1;
-                        if !drawn.ends_with('\u{2026}') || width(drawn, bold) > PICTURE_TILE_W {
-                            out.push(format!("{tag} {kind:?} {set:?}: {natural:?} drawn as {drawn:?} ({}px)", width(drawn, bold)));
-                        }
-                    }
-                    if !bold && kind == PosterKind::Movie && widest.as_ref().is_none_or(|(_, w)| width(natural, false) > *w) && tag == "en" {
-                        widest = Some((natural.clone(), width(natural, false)));
-                    }
+                let lines: Vec<_> = runs.iter()
+                    .filter(|r| r.ink == theme::CAPTION_DETAIL_INK && (r.at.x - centre).abs() < 1.0)
+                    .map(|r| r.text.as_str()).collect();
+                let fits = lines.len() <= PICTURE_DETAIL_LINES && lines.iter().all(|text|
+                    ShippedMeasure.width_str(text, theme::size::CAPTION, false) <= PICTURE_LINE_W);
+                if !fits || normalize(&lines.join(" ")) != normalize(details.as_deref().unwrap_or("")) {
+                    out.push(format!("{} {kind:?} {set:?}: {details:?} drawn as {lines:?}", language.tag()));
                 }
             }
         }
     }
     plx_ui::table::assert_no_fit_failures(&out);
-    let (line, w) = widest.expect("an English movie line");
-    assert_eq!(line, "1h 52m \u{b7} Drama \u{b7} 4K \u{b7} HDR \u{b7} PG-13", "the widest English four-part movie line");
-    assert!(elided > 0 || w <= PICTURE_TILE_W, "either some line is elided, or the widest fits ({w}px)");
 }

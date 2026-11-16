@@ -83,6 +83,8 @@ pub enum PickerKind {
     DirectPlay,
     SubtitleSize,
     SubtitlePosition,
+    /// The caption colour (`SubtitleTone`): white, yellow or a gray. Next to Size and Position.
+    SubtitleColor,
     HdrOverlay,
     NextEpisode,
     SkipInterval,
@@ -95,6 +97,8 @@ pub enum PickerKind {
     UiResolution,
     /// Optional immediate D-pad jumps.
     InstantDpadSeeking,
+    /// The viewer's opt-in to the URI engine (Standard / Experimental).
+    UriEngine,
     /// Manual Dolby Vision override (Auto / Off).
     DolbyVision,
     IntroSkip,
@@ -165,8 +169,8 @@ impl PickerKind {
     /// The page that lists this field (its picker is pushed from there and returns there).
     pub fn parent(self) -> SettingsPage {
         match self {
-            PickerKind::Quality | PickerKind::DirectPlay | PickerKind::HdrOverlay | PickerKind::NextEpisode | PickerKind::DeckPress | PickerKind::SkipInterval | PickerKind::InstantDpadSeeking | PickerKind::DolbyVision | PickerKind::IntroSkip | PickerKind::CreditsSkip => SettingsPage::Playback,
-            PickerKind::AudioLanguage | PickerKind::SubtitleMode | PickerKind::SubtitleLanguage | PickerKind::ForcedSubtitles | PickerKind::SubtitleSize | PickerKind::SubtitlePosition => SettingsPage::AudioSubtitles,
+            PickerKind::Quality | PickerKind::DirectPlay | PickerKind::HdrOverlay | PickerKind::NextEpisode | PickerKind::DeckPress | PickerKind::SkipInterval | PickerKind::InstantDpadSeeking | PickerKind::UriEngine | PickerKind::DolbyVision | PickerKind::IntroSkip | PickerKind::CreditsSkip => SettingsPage::Playback,
+            PickerKind::AudioLanguage | PickerKind::SubtitleMode | PickerKind::SubtitleLanguage | PickerKind::ForcedSubtitles | PickerKind::SubtitleSize | PickerKind::SubtitlePosition | PickerKind::SubtitleColor => SettingsPage::AudioSubtitles,
             PickerKind::UiResolution => SettingsPage::Root,
         }
     }
@@ -297,10 +301,11 @@ pub struct InnerHost;
 pub struct InnerViews<'a> {
     pub directory: plx_data::stores::browse::DirectoryView<'a>,
     pub marker_prefs: plx_appkit::skip_policy::MarkerPrefsView,
+    pub inputs: &'a crate::registry::ScreenInputs,
 }
-impl<'a> From<plx_data::stores::browse::DirectoryView<'a>> for InnerViews<'a> {
-    fn from(directory: plx_data::stores::browse::DirectoryView<'a>) -> Self {
-        Self { directory, marker_prefs: Default::default() }
+impl<'a> InnerViews<'a> {
+    pub fn new(directory: plx_data::stores::browse::DirectoryView<'a>, inputs: &'a crate::registry::ScreenInputs) -> Self {
+        Self { directory, inputs, marker_prefs: Default::default() }
     }
 }
 
@@ -325,6 +330,10 @@ impl Host for InnerHost {
     type Memory = ();
 }
 
+impl crate::registry::ScreenInputsLike for InnerHost {
+    fn screen_inputs<'a>(cx: &Cx<'a, Self>) -> &'a crate::registry::ScreenInputs { cx.views.inputs }
+}
+
 impl DirectoryLike for InnerHost {
     fn directory<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::DirectoryView<'a> {
         cx.views.directory
@@ -339,7 +348,7 @@ impl DirectoryLike for InnerHost {
 /// borrow to hand it to a `DrawFrame`.
 pub fn inner_cx<'o, 'a: 'o, H: DirectoryLike>(cx: &Cx<'a, H>) -> Cx<'o, InnerHost> {
     Cx {
-        views: InnerViews { directory: H::directory(cx), marker_prefs: H::marker_prefs(cx) },
+        views: InnerViews { directory: H::directory(cx), marker_prefs: H::marker_prefs(cx), inputs: H::screen_inputs(cx) },
         tick: cx.tick,
         measure: cx.measure,
         press: cx.press,

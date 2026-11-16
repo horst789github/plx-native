@@ -50,7 +50,7 @@ arguments, and its time is the `dt` it is handed.
    matter more than couch-copy scale, and it must never migrate into chrome or prose. The hero
    SYNOPSIS is the case that proves
    the rule and it is no longer here: a blurb is the longest run of prose on its page, so it is
-   reading copy, and both heroes now draw it at `LABEL` 26 through `ui::hero_synopsis`. (The hero
+   reading copy, and Detail draws it at `LABEL` 26 through `ui::hero_synopsis`. Home has a separate line for episode, movie or show metadata, or a short premise. Remaining time lives in the Resume button. (The hero
    identity line uses `theme::hero::IDENTITY_SIZE`, regular `CAPTION` 24, matching the latest PDF.) Pass a rung to `Painter::text`/`Label`/`TextView`/`text::elide` instead of a bare
    `24`/`28`/… — a size is a role, not a magic number; pick the nearest rung, and if no rung fits a
    genuinely new role, **add a documented rung to `pub mod size` in `gfx/tokens.rs`** (`theme::size`
@@ -181,7 +181,7 @@ default a spec is built with and no screen runs it, so a scroll fault on a stack
 snapping grid (`GridSpec::new`; a grid built with `GridSpec::resting` is read through
 `rest_target(end)` instead, because `reveal_target()` has no document end in it and `Stack::wanted`
 passes its own; the Library applies the same rule through `Layout::row_reveal` ->
-`poster_grid::rest_scroll`, and Home's shelf grid through `home::rest_scroll` -> `cards::grid_rest_scroll`,
+`poster_grid::rest_scroll`, and Home's shelf grid through `home::ShelfColumn::rest` -> `cards::grid_rest_scroll_at` over `cards::settled_top_by` (one rule over the rows' OWN pitches: the stills deck is shorter than a poster shelf; `rest_scroll` is the uniform-pitch case),
 so the focused shelf rests with its heading at `GRID_TOP_Y - TITLE_DY` whatever the Under posters band
 and whichever way focus arrived) and applies the document
 shift a content landing needs, `landed_shift()`, to its scroll and scroll target; the grid does
@@ -328,9 +328,13 @@ which the orphan rule forbids.
 references: `Session` (auth, profile, the one `ProfileScope`), `Consent`, `Input` (press, key-repeat
 edges, pointer visibility, the double-buffered hit map, and the `FocusEngine` that holds THE
 current focus — screens keep no copy), `Present` (the gate), `Navigation` (the container tree and
-every entry/instance), `Player`, `Stores`, `Adapters`. Ownerships that used to be double are now
-single: the press belongs to `Input`, the modal phase to `ModalStack`, the present gate to
-`Present`, `ProfileScope` to `Session`.
+every entry/instance), `Player`, `Stores`, `Adapters`. Press belongs to `Input`, the modal phase
+to `ModalStack`, and `ProfileScope` to `Session`. `Dispatcher::present` is the runtime
+frame gate; `App` does not own a second gate. `Input` supplies the explicit `PressRead`, and
+`NavStack` supplies `NavPresentation` through `DrawFrame`. Rendering scopes report only
+frame-captured motion through `plx_machine::motion::report`. Content damage and its page/surface
+attribution are typed effects on the owning `Present`, never an ambient generation or collector.
+Admission retains pending work until the loop acknowledges an actual swap.
 
 **Navigation is a model, not a route word (§6.2).** `containers/` is the fold:
 TabContainer → NavStack → ModalStack. A screen is an owned INSTANCE with logical state inside and
@@ -351,7 +355,7 @@ Keymanager and LS2 calls. Tests panic (catchably). In developer builds (`threadc
 `main-thread block: <label> at <file:line> (fatal; aborting)`, then aborts on the frame thread before the call runs.
 Release builds retain elapsed-time logging once per (label, call site):
 `main-thread block: <label> <ms>ms at <file:line> [under <exception label> at <file:line>]`. Use cached reads and, in the IO layer, the bounded `storage_worker` queue, then observe the landing
-on the frame thread and call `idle::invalidate()` only when visible content changed. Boot's synchronous loads run before the frame scope; a new blocking exception
+on the frame thread and apply typed damage through its owned `PresentHandle` only when visible content changed. Boot's synchronous loads run before the frame scope; a new blocking exception
 must be explicit and justified through `task::allow_blocking`, never added to a tick — and every production
 `allow_blocking(` site is a line in `ci/allow/blocking.txt`, which the `blocking` gate holds exact (a
 new site or a stale line fails; the list only shrinks). Move the work off the frame: in machine code (`ui/`,
@@ -413,13 +417,13 @@ implementations — `TtfMeasure` (device/sim), `TableMeasure` (replay, from the 
 table) and `FixtureMeasure` (host tests) — and travels on `Cx`/`DrawFrame`. The point of both is
 §5: real scenarios record and replay deterministically.
 
-**What has NOT landed** — the guide says so rather than letting `lib.rs` imply otherwise:
+**Ownership migration and remaining acceptance**:
 
-- §11 lists `nav.rs`, `trail.rs` and `press.rs` for deletion. Only `trail.rs` is gone; `nav.rs`
-  (164 lines) and `press.rs` (619) are still here and still used.
-- §11 says `present.rs` REPLACES `idle.rs`. Both exist (in `rust-modules/machine/src/`, since the
-  machine split) — `idle.rs` at 1127 lines against `present.rs`'s 242 — so the gate has two homes
-  and `idle.rs` is still the larger one.
+- The ownership migration removes `nav.rs`, `trail.rs`, root `press.rs` and `machine/src/idle.rs`.
+  The press machine lives in `ui/src/dispatch/press.rs`; consumers take explicit readouts.
+- `machine/src/present.rs` owns admission and actual-swap accounting; `motion/report.rs`
+  contains scoped frame motion only; the global damage adapter is removed. Runtime and device acceptance must be
+  reported separately from these source-level ownership guarantees.
 - §0's done-criterion 9 (`doc_claim_auditor` clean against §11's prose list) is not met.
 
 Modules with no product caller yet carry `#![allow(dead_code)]` with a one-line reason; that is
@@ -728,6 +732,26 @@ tried first. None of it is reconstructable from the code without repeating the m
   texture uploads are untouched and only the fill goes away. An owned surface asks for it through
   its `Style` instead.
 
+- **A page ground that is not moving is served as ONE quad, and the glass over it never knows.** Home
+  parked at the hero paints its backdrop (wash, photograph and the shared side and shelf shade) once into the region texture
+  (`Painter::cached_ground`, over `gfx::region_paint`) and serves it from there until an input changes:
+  a Continue Watching focus move redraws the shelf over a ground that did not, and the live ground
+  was 2.6M of a 9.5M-cycle frame. The name (`Backdrop::ground_key`) is every input the SCREEN owns by
+  value (the shade included, `WashScrim::paint_bits`: the shelf ramp rides the first shelf's live
+  top); the renderer's own state is folded in below the screen, never read by it: `cached_ground` is
+  handed the texture ids the picture samples and `gfx::region_ground_key` mixes in each one's
+  revision (a texture re-specified under the same name is another picture) and the two program
+  switches the ground's paths read. The picture has NO name while any spring easing it is unlanded
+  (`AmbientWash::at_rest`; a resident art layer's reveal spring at exactly 1.0 with no velocity, not
+  merely no velocity, because `bind` leaves one at 0 where it `jump`s or where art arrives; the
+  dive, which `update` lands on its target: a bare `step` parks it one ulp off and never reaches 0),
+  because a name that moved every frame would fill the
+  texture every frame, which is the live shading plus a full-screen write. The glass is untouched by
+  construction: its discovery walk and every source pass are `backdrop::discovering()` /
+  `blur_source_pass()` frames, where `region_paint` declines, so the ground still declares and draws
+  its primitives there exactly as before and `GLASSDIFF` keys on the same arguments. A ground takes
+  no cascade as a group (`Painter::is_plain`): through a dip, a gain or a translate it is live.
+
 - **Every slow FIELD takes ONE dither whenever it is drawn, and it is not a per-shader decision.**
   An 8-bit framebuffer quantises: Settings over Home measured a 700-row column spanning luma 55.7
   to 59.1 in FOUR levels, treads of 158, 157 and 146 rows. `shaders/dither.glsl` is the answer and
@@ -757,38 +781,39 @@ of stacked shelves hands each one the lift of the next shelf's heading (`Section
 `Stack`, Home, Recommended and Detail do; a `Stack` page keeps its shelves adjacent, the air under one its
 `StackPage::shelf_foot`, never a `Custom` gap section between two); `GridBands::closing` names the card a closing band's caption belongs to.
 Live and target geometry include these bands, so painting, paging, scrolling and restored
-viewports agree. Episode rows use landscape stills. `Art::Still` supplies the label ground;
-`widgets::still_overlay` draws its labels and resume bar afterward. Both the artwork and
+viewports agree. Episode rows use landscape stills; the Continue Watching row's is `RowStyle::STILL`
+(the episode cell at `theme::STILL_RADIUS`; the focused still only pops, and every other tile stands at its
+rest x at any pop progress: the 1.09 pop grows a tile ~19 px a side inside the 40 px gap, `theme::STILL_GAP`, pitch 460; the Detail strip's `EPISODE` style keeps 28), with no caption band under it (`captions::NOTHING_UNDER_STILLS`, Home's and Recommended's landscape deck alike). A tile's focus pop
+reaches a mark that must ride it as `cards::Tile::pop` (0..1, the pop spring read as progress), never
+as a timer of the mark's own. The deck card's artwork (Plex's cover, then the baked composite, then the
+title in type) is `card_art::pick` over `tile_facts::for_deck`; the composite is a bitmap baked once by
+the poster worker (`card_art::compose`), never a live logo. The footer's one-line fit rule is
+`still_footer::footer_geometry`, the one place its widths are decided (a started episode: `S2 E4 · 38m left` and a bar; an unstarted one: `S2 E1 · New episode` and no bar, the tag kept while the whole text fits). The stills row's heading stands `RowStyle::heading_rise` (`theme::STILL_HEADING_RISE`) above a poster shelf's, joined with the focus lift by `card_row::heading_lift_of`, which `Shelf::heading_lift()` reports to Home and Recommended alike. `Art::Still` supplies the label ground;
+`widgets::still_overlay` draws its labels afterward (a `StillFooter::Shelf` still also its full-bleed resume bar; a
+`StillFooter::Continue` still its one footer line, bar included: on the deck that line stands BELOW the art with no scrim,
+`still_footer::Place::Below`, 8 px under the tile; the Detail strip's stays in the art, `Place::InArt`). Both the artwork and
 its ground participate in backdrop discovery, including texture changes and UV cropping.
 
-- An **amber ▶** means **this press starts the video**. It is drawn where that is true and nowhere
-  else: the detail page's episode filmstrip always, and a Continue Watching deck only while
-  Settings > Playback > Continue Watching is "Play" (`DeckPress::Play`; the default opens the page
-  and draws none). On a poster deck (Home's, Recommended's) the mark leads the FIRST line the Under
-  posters setting draws (`registry::captions::label`): the title when Title is On, else the details
-  line ("8m left"), hanging to the left of a line that is centred as if it were not there; with the
-  title and the details both off (Nothing) no line is drawn and so no mark, EXCEPT on the deck: its
-  progress line ("S3 · E4 · 18m left") is the tile's state and is always shown, Nothing included (the
-  owner's 2026-10-22 call; `captions::deck_policy`), so the deck's band keeps one line (two with the
-  Title On) and the mark leads that line. The band is per shelf, so it never changes as focus walks
-  the row. Watch state does not
-  withdraw it — `widgets::still_glyph` is the whole rule, graded by an exhaustive table, because
-  the clause that failed first was the absent one: the glyph used to be decided by `PosterMark`
-  FIRST, so an in-progress tile drew nothing and a Continue Watching deck — almost entirely
-  in-progress tiles — announced nothing and then played.
+- **No card draws an amber ▶.** Nobody read it as "playback starts", and what OK does is now said by the
+  focused Continue Watching still's footer cue (`ui::still_footer`): a white play glyph when the
+  Playback setting makes OK play (`DeckPress::Play`), an info glyph when it opens the page (the
+  default). The cue sits in a 28 px slot that is collapsed at rest and opens with the card's own
+  focus-pop (`cards::Tile::pop`), so the footer text moves by exactly the slot and the bar shrinks
+  toward it, never below 64 px. The detail page's episode strip has no cue (OK there always opens or
+  plays the episode, and the strip is not a deck). The caption mark is gone from the code too
+  (`TileLabel::glyph`, its draw path and the census that read it were removed), so no caption can bring it back.
 - An **amber resume BAR** means **how far in you already are**. It is a fact about the item, not a
   promise about the press, so it is drawn wherever there is progress to report, including on a
-  shelf that navigates. Hiding it there would hide something true; the triangle beside it was
-  always the mark that read as "this will play".
+  shelf that navigates. Hiding it there would hide something true. On a Continue Watching still
+  it is the footer's own 6 px bar (radius 3) on the right, under the art, and on a strip card a 4 px bar inside it (each
+  100 px, shrinking to 64);
+  `resume_bar` (the full-bleed band) is for posters and `StillFooter::Shelf` stills.
 - A **`✓`** means **finished** — likewise a state, not a promise.
 
-**A card with no play indicator NAVIGATES** (a poster deck set to Play with the title and details both Off draws no
-line to carry the mark, the one exception), and an episode navigates to its own detail page —
+**What a press does is a fact of the route, not of a mark**: an episode navigates to its own detail page,
 except on Continue Watching, where it opens the SHOW on the card's season
-(`app::input::activate_deck_card`; the card menu's Go to Episode is the way to the episode).
-Until 2026-09-05 `want_play` was `from_deck || kind == 3` on both Home and the Library, so an
-episode played immediately from ANY shelf and every landscape tile drew the triangle whatever its
-press did. Behaviour and mark both read `is_continue && route::deck_press().press_plays()`
+(`app::input::activate_deck_card`; the card menu's Go to Episode is the way to the episode), or resumes
+when `route::deck_press().press_plays()`. The footer cue reads the same `press_plays()`
 (`Shelf::is_continue` / `pms::hub_is_continue` alone is no longer the answer to either), so they
 cannot disagree. A poster wears nothing at all when it has never
 been started — most of a server is unstarted, so a clean shelf is the common case and a mark is
@@ -831,7 +856,7 @@ each blur source job, the visible pass) and each walk ticks. **A page shown as a
 recorded (`placeholder::since`) and re-noted on every frame the image is painted; the pixel oracle
 cannot see a placeholder inside a blended image, so the counter alone vouches for those frames
 (`Dispatcher::held_page_image`). A picture drawn once into the region texture and then served as one
-quad (`Painter::cached_region`, the Settings Under posters preview) keeps the same books itself: it records
+quad (`Painter::cached_region`, the Settings Under posters preview; `Painter::cached_ground`, Home's parked backdrop) keeps the same books itself: it records
 the fill's debt with the key and re-notes it on every frame the texture is served, so its caller books nothing. A frame dump holds no image (every dip frame re-captures the page
 live, `PageImage::step_filmed`), so there the capture's own draw is the debt.
 
@@ -917,18 +942,14 @@ Note the asymmetry, because it tells you where to put a new test: `card_row.rs` 
 `CardRow`, so its tests are ordinary and parallel; an owned screen's tests hold no focus of their
 own (the `FocusEngine` does). Tests that seed the shared registry or the remaining global stores
 take `testlock::serial()`; tests using separate production BrowseStore owners isolate their state
-and landings. **`xfade.rs` is
-the cautionary case**: its tests were ordinary and parallel until `tick` started reporting to
-`plx_machine::idle`'s process-global flag, at which point driving a fader began mutating state *another
-module's* assertions read. They all take `testlock::serial()` now. Anything you make report to the
-frame gate inherits that obligation — and the lock is ENFORCED rather than merely documented since
-2026-09-10: it records the holding thread, and the shared stores (plus the app frame trunk, which
-pumps all of them) call `testlock::assert_held`, so an unguarded write panics in the test that made
-it rather than in whichever bystander it happened to land on.
+and landings. Present damage is owner-local, and motion reports are frame-local to the driving
+thread. Tests touching the documented worker wake or shared caches still take the serial lock.
+The lock records the holding thread; shared stores and the app frame trunk call
+`testlock::assert_held`, so an unguarded shared write fails at its source.
 
 **If you add anything that ANIMATES, it owes two tests**, because the failure modes are opposite and
 each is invisible to the other's gate. Host: it reports while running **and** goes quiet at rest —
-`machine/src/idle.rs`'s and `ui/xfade.rs`'s test modules are the pattern, including a settled-tree case that
+`machine/src/idle_regression_tests.rs` and `ui/xfade.rs`'s test modules are the pattern, including a settled-tree case that
 steps 439 springs and asserts *nothing* is requested. Device: an `fps_floor` scene proving it
 still animates under the gate, and (if its screen settles) an `fps_ceiling` proving it stops. An
 over-reporting animator costs the entire ~38-points-of-a-core saving while every `floor` in the

@@ -36,6 +36,7 @@ pub(super) fn grid_art(item: &plx_data::pms::PmsMovie) -> Art<'_> {
 }
 
 /// The standard focused caption policy; a grid sorted by a value draws its value line instead.
+#[cfg(test)]
 pub(super) fn caption_policy() -> CaptionPolicy { crate::registry::captions::policy() }
 
 /// A grid card's label under `policy`: the focused caption band shows exactly what the Under
@@ -43,8 +44,8 @@ pub(super) fn caption_policy() -> CaptionPolicy { crate::registry::captions::pol
 /// a season on Home; a collection's details line is its size, and a name its face cuts rides it). An episode is a landscape still, not a poster, and keeps its own block in the
 /// legacy band ([`captions::still_label`](crate::registry::captions::still_label)).
 pub(super) fn grid_label(item: &plx_data::pms::PmsMovie, policy: &CaptionPolicy) -> ui_cards::TileLabel {
-    if item.kind == 3 { return crate::registry::captions::still_label(item, false, ""); }
-    crate::registry::captions::label(policy, &tile_facts::caption_facts(item), None, false)
+    if item.kind == 3 { return crate::registry::captions::still_label(item, ""); }
+    crate::registry::captions::label(policy, &tile_facts::caption_facts(item), None)
 }
 
 #[derive(Default)]
@@ -241,7 +242,7 @@ impl GridPart {
     pub(super) fn on<H: LibraryLike>(&mut self, ev: &ScreenEvent<H>, cx: &Cx<'_, H>,
         fx: &mut Effects<'_, H>, scroll: f32) -> f32 {
         self.grid.set_page(CONTENT_TOP + self.layout.grid_top(), scroll);
-        let src = GridSrc { total: self.total, windows: &self.windows, indexes: &self.indexes, view: H::listing(cx), policy: caption_policy(), values: self.layout.value_line(), today: H::today(cx), captions: &self.captions };
+        let src = GridSrc { total: self.total, windows: &self.windows, indexes: &self.indexes, view: H::listing(cx), policy: crate::registry::captions::policy_for(H::screen_inputs(cx)), values: self.layout.value_line(), today: H::today(cx), captions: &self.captions };
         let _ = self.grid.on(ev, cx, &src, fx);
         if !matches!(ev, ScreenEvent::Tick(_)) { return 0.0; }
         // The re-list's landing started on this tick or has ended: once it is no longer playing
@@ -297,7 +298,7 @@ impl GridPart {
         self.scroll_target = scroll_target;
         self.grid.set_columns(layout.cols(), layout.style(), MARGIN_X);
         self.grid.set_value_line(layout.value_line());
-        self.grid.set_caption_policy(Some(caption_policy()));
+        // The owner supplies the frame's band policy through set_band_policy below.
         self.grid.set_page(CONTENT_TOP + layout.grid_top(), scroll);
     }
 
@@ -526,7 +527,7 @@ impl GridPart {
 
     /// The grid's content, read off the published items. O(1) to build: borrows, no copy.
     fn source<'a, 'v, H: LibraryLike>(&'a self, cx: &Cx<'v, H>) -> GridSrc<'a, 'v> {
-        GridSrc { total: self.total, windows: &self.windows, indexes: &self.indexes, view: H::listing(cx), policy: caption_policy(), values: self.layout.value_line(), today: H::today(cx), captions: &self.captions }
+        GridSrc { total: self.total, windows: &self.windows, indexes: &self.indexes, view: H::listing(cx), policy: crate::registry::captions::policy_for(H::screen_inputs(cx)), values: self.layout.value_line(), today: H::today(cx), captions: &self.captions }
     }
 
     /// The painter the grid draws and registers stops through: the page's alpha, and the stops
@@ -655,7 +656,7 @@ impl<H: Host<Elem = u32>> CardSource<H> for GridSrc<'_, '_> {
     fn overlay(&self, p: Painter, i: usize, tile: &Tile, measure: &dyn Measure) {
         #[cfg(test)] OVERLAID.with(|seen| seen.borrow_mut().push((i, tile.scale)));
         if let Some(item) = self.view.item(i).filter(|item| item.kind == 3) {
-            plx_ui::widgets::still_overlay(p, &tile_facts::of(item), tile.rect, tile.radius, false, measure);
+            plx_ui::widgets::still_overlay(p, &tile_facts::of(item), tile.rect, tile.radius, plx_ui::widgets::StillFooter::Shelf, measure);
         }
         // A smart collection wears its mark, focused or not, on the popped tile's rect.
         if self.collections() && self.view.item(i).is_some_and(|item| item.smart) {
@@ -772,7 +773,7 @@ impl<H: LibraryLike> Focusable<H> for GridPart {
 }
 
 impl<H: LibraryLike> Part<H> for GridPart {
-    fn prepare(&mut self, _budget: &mut Budget, cx: &Cx<'_, H>) { self.prepare_ahead(super::lookahead::rows(), cx); }
+    fn prepare(&mut self, _budget: &mut Budget, cx: &Cx<'_, H>) { self.prepare_ahead(H::screen_inputs(cx).runtime_policy.lookahead_rows, cx); }
 
     fn draw(&mut self, f: &mut plx_ui::screen::DrawFrame<'_, '_, H>, _rect: Rect) {
         // Metadata still pages ahead via LibraryWork::Want. Hidden artwork waits until visible
@@ -785,7 +786,7 @@ impl<H: LibraryLike> Part<H> for GridPart {
             // Under the cards that slide over their cells.
             let view = H::listing(f.cx);
             let sort = self.layout.value_line().then(|| sort_key(&view));
-            let ghosts = GhostSrc { items: self.grid.ghost_keys().map(|key| self.ghosts.get(&key)).collect(), policy: caption_policy(), sort, today: H::today(f.cx) };
+            let ghosts = GhostSrc { items: self.grid.ghost_keys().map(|key| self.ghosts.get(&key)).collect(), policy: crate::registry::captions::policy_for(H::screen_inputs(f.cx)), sort, today: H::today(f.cx) };
             self.grid.paint_ghosts(f, p, &ghosts);
         }
         let src = self.source(f.cx);
@@ -890,7 +891,7 @@ impl<H: Host<Elem = u32>> CardSource<H> for GhostSrc<'_> {
     }
     fn overlay(&self, p: Painter, i: usize, tile: &Tile, measure: &dyn Measure) {
         if let Some(item) = self.item(i).filter(|item| item.kind == 3) {
-            plx_ui::widgets::still_overlay(p, &tile_facts::of(item), tile.rect, tile.radius, false, measure);
+            plx_ui::widgets::still_overlay(p, &tile_facts::of(item), tile.rect, tile.radius, plx_ui::widgets::StillFooter::Shelf, measure);
         }
     }
     fn loaded(&self, i: usize) -> bool { self.item(i).is_some() }

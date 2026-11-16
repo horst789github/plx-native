@@ -32,7 +32,16 @@ and contrasting-ambient replay with outbound IO denied, malformed-input refusals
 supported-effect discriminator. Its private recording must pass `tools/plxnative-rec check`
 before `import`/`rerecord`; a live-mock focus smoke alone is not replay acceptance.
 
-The hash includes `AppFrameV4{route,overlay,focus,tree,session,consent,initial}`: the press machine, the route/overlay words and the
+`6-settings-family` and `12-filmography-detail-return` are the historical key-only fixtures: they
+retain their original `AppFrameV4` ledger and expected
+hashes. (`1-boot-home-chip-grid` was one until its re-recording as a current `AppFrameV5` recording,
+see the last entry below.) Controlled preflight proves all inputs are owned keys; the grader then writes the
+frozen idle bytes of the retired app press before the unchanged V4 frame fields. No
+legacy press is constructed/stepped in production and no frame grades are skipped. Legacy
+pointer/direct-token profiles cannot prove idle shadow state and are refused. New
+recordings use `AppFrameV5` and the current codec-6 bootstrap envelope.
+
+The historical hash includes `AppFrameV4{route,overlay,focus,tree,session,consent,initial}`: the press machine, the route/overlay words and the
 focus fingerprint from phase 2, plus — since phase 5b — `tree`, which is `Dispatcher::state_hash`
 (every live container instance's `LogicalState`, the tree's shape and surface phases, saved entry
 arguments and return memory even after eviction, the engine's focus and the queue depth), plus
@@ -645,3 +654,58 @@ anchor was recorded afresh (`tests/focusfp.sh --rec --only 6`, old fixture remov
 import`, `anchor: true` restored, manifest byte-identical) and replayed SAME in Targets and Resolve
 on three consecutive runs. The closed alphabet adds `Legal`, `Privacy` and `Privacy &` (the page
 titles, measured word by word; `_sources.settings_v2`).
+
+The Continue Watching redesign (the stills row, the page that stays on the hero while a Continue Watching
+tile holds focus, the one-line still footer with the episode tag) changed recorded behaviour without moving the shape
+(`state_fp` 5612583773909772043): all three committed anchors were observed diverging on frame 3, where the
+hubs land (`replay: diverge f=3 ...`), then refusing (`replay: REFUSED — replay measurement table miss`), in both
+modes, on CI's macOS simulator job and locally (`make check-replay`, six failures). The `hero_auto` gate was ruled
+out by replaying against a build with it disabled (the same `got` hash on all three); the measurement delta
+is exactly ten new Width keys, the footer's started lines (`32m left`, `S2 E2 · 32m left` and four more pairs; the old
+`S2 · E2 · 32m left` is gone), and the row's geometry is hashed shelf state. The recordings' input key
+sequences are unchanged. The anchors were recorded afresh on the unchanged shape (`tests/focusfp.sh --rec --only 1,6,12`, 350 ms
+keys, 1 s boot settle, 1.5 s final settle), checked, and only each recording segment replaced (the manifests are
+byte-identical, `anchor: true` kept), then replayed SAME in Targets and Resolve on three consecutive runs and at the
+CI window (960x540). `focusfp_check.py` flow 1 now expects the first shelf, Continue Watching, to hold the page
+(`snapt=0 row=0`) and the second shelf to dive (`snapt=1 row=1`). The closed alphabet gains `[0-9]+m left` and
+`S[0-9]+ E[0-9]+ · [0-9]+m left` (`_sources.cw_stills_footer`).
+
+The Home hero (owner's board CW-13 v2: Home's own text ladder over the action row, the Continue Watching
+tiles at a 40 px gap with their footer below the art, the flat action row with the pager following Info in it
+(the anchors were recorded while it still stood at the right margin; the board's correction then moved it into
+the row), and the content-following hero shade) changed recorded behaviour without moving the shape (`state_fp`
+5612583773909772043): all three committed anchors were observed diverging on Home's first drawn frames
+(`replay: diverge f=3` on `1-boot-home-chip-grid`, f=4 on `12-filmography-detail-return`, f=5 on
+`6-settings-family`), then refusing (`replay: REFUSED — replay measurement table miss`), in both modes
+(`make check-replay`, six failures). The anchors were recorded afresh on the unchanged shape
+(`tests/focusfp.sh --rec --only 1,6,12`, 350 ms keys, 1 s boot settle, 1.5 s final settle), and
+`plxnative-rec check` refused all three for one string, an episode hero's one bold label ("S<n>, E<n> ·" and the
+mock's synthetic title, `ui/src/fmt.rs` `episode_kicker`), which the closed alphabet gains as
+`S[0-9]+, E[0-9]+ · s[0-9a-f]{8}` (`_sources.hero_episode_label`). Only each `rec-0000.jsonl` was replaced (the
+manifests equal the new recorder's header field for field, `anchor: true` kept); the replays are SAME in
+Targets and Resolve with every difference counter at zero on three consecutive runs, one of them at the CI
+window (960x540).
+
+The Home Resume pill measures a compact remaining duration, and the episode hero measures a season
+and episode address as part of its metadata row. Both replay modes refused all three old anchors
+with a measurement table miss. The anchors were re-recorded with
+`tests/focusfp.sh --rec --only 1,6,12`, keeping the same inputs and manifests. The closed alphabet
+adds the three exact strings from the seed-1 mock. Targets and Resolve both match all frames at
+960x540.
+
+Home's snap dive now lands exactly on its target (`Spring::land`, called by `HomeScreen::update` after
+the dive's `step`, so the parked hero's backdrop cache keeps its name after a Hero to grid to Hero trip,
+PR #1302): the dive used to park one ulp off with a velocity of ~1e-44, which the canon hashes bit for
+bit. `1-boot-home-chip-grid` was observed diverging from frame 154 (46 of 200 frames) in Targets and
+Resolve with every other counter zero (`present_diffs`, `input_diffs`, `result_diffs`, `land_diffs`,
+`effect_diffs`, `focus_diffs`, `hit_diffs`), while `6-settings-family` stayed SAME and
+`12-filmography-detail-return` stayed REFUSED_EXPECTED. The divergence was attributed by replaying the
+committed anchors against a build with only that `Spring::land` call removed (every anchor SAME, every
+counter zero). The fixture was a historical key-only `AppFrameV4` recording (shape `4239819007634745513`)
+that the current recorder cannot emit, so it could not be recorded afresh on its own shape: it was
+re-recorded as a current `AppFrameV5`/codec-6 recording (`tests/focusfp.sh --rec --only 1`,
+`MOCK_PORT=32552 FOCUS_STEP=0.35 FOCUS_SETTLE=1.5 FOCUS_BOOT_SETTLE=1`, shape `13512213413816145485`,
+266 frames, `plxnative-rec check` synthetic) and replaced with `tools/plxnative-rec rerecord`, which keeps the
+`anchor` flag. That retires this one fixture's `AppFrameV4` ledger; `6-settings-family` remains the key-only
+fixture that replays SAME. `make check-replay` replays every fixture as SAME or REFUSED_EXPECTED in Targets and
+Resolve with every difference counter at zero (three consecutive runs, one of them at the CI window, 960x540).

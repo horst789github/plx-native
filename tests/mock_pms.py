@@ -255,8 +255,56 @@ a plain 200 and the whole file, as a server (or proxy) that ignores Range does; 
 splices that in as the bytes at its offset corrupts the picture, so it must refuse it. Combine the
 two to see the refusal on a TV: the cut is reopened, the reopen answers 200, playback fails with a
 transport error instead of continuing from the wrong bytes.
+
+`--cw-art-fixture [primary|twin]` (default off; every other answer is byte-identical, in the seeded
+library and under `--catalog`) is the data behind the horizontal Continue Watching art (the 420x236
+cards that draw Plex's own cover, else a bitmap baked from background and clearLogo, else the title in
+type): five dedicated items at
+ratingKeys 940001+ that head Continue Watching, one per art path a card can take. They are the ONLY
+items of the mock that carry a 24-hex `plex://movie|show/<hex>` guid on purpose; the rest of the
+library keeps the guids it had (the generated ones and the demo catalog's `demo-<slug>`), so nothing
+else changes eligibility.
+
+  * "North Ridge" (S2 E4, 38m left of 95, 60%): a Discover record WITH `coverArt` (cover path);
+  * "Lumen Drift" (a film, 1h 12m left of 1h 51m, 35%): the same, and it is the title held on TWO
+    servers (see `twin` below);
+  * "The Quiet Harbour" (S1 E7, 41m left): Discover answers an `Image[]` WITHOUT `coverArt`, and the
+    PMS has a background and a clearLogo: the composite path;
+  * "Brass Hours" (S2 E1, "New episode": on deck, no resume point): no `coverArt` (Discover's body
+    has no `Image` key at all), no clearLogo (the PMS answers 404 for it and its `Image[]` has none):
+    the title-in-type path;
+  * "Tin Lighthouse" (a film, 1h 6m left of 1h 36m): a `local://` guid, so no catalog id and no cover
+    read: straight to the composite.
+
+An episode row carries its SHOW's guid as `grandparentGuid` (`plex://show/<hex>`, the key the cover is
+read by) and its own guid as `plex://episode/<hex>`; the show and season items exist too. Every item's
+PMS `Image[]` lists `coverPoster`, `background`, `clearLogo` (only where the item has one, at a STAMPED
+`/library/metadata/<rk>/clearLogo/<ts>` path) and `snapshot`; an episode's `background` and `clearLogo`
+name its show's (that an episode row carries `Image[]` at all, and which paths it names, is an
+assumption: no probe of a real server has settled it). All the art is generated at request time and is
+synthetic: a vertical gradient per title (16:9 for `background`, `snapshot`, `coverArt`), PNG-alpha
+wordmark blocks for `clearLogo` (5:1), never a copyrighted or household image; it is scaled like the
+PMS's photo transcoder with `minSize=1` (cover the box, keep the aspect), so a 600x240 clearLogo
+request comes back 1200x240.
+
+The Discover stand-in answers `GET /library/metadata/<hex>` for these titles (they are off the
+Watchlist), and a title that has a cover carries `Image[]` with `{"type": "coverArt", "url": <absolute>}`
+pointing at the MOCK'S OWN `/_mock/art/<hex>/coverArt.png`; `/photo/:/transcode` serves that absolute
+`url=` (a real PMS fetches it from Plex's image host and transcodes it; the mock resolves it by path and
+never dials out, whatever the host in it). These titles are WATCHLIST-ELIGIBLE (a `plex://movie|show/`
+hex guid, `/library/all?guid=` finds them), so a card of one may gain the Watchlist menu rows and discs
+that a card of any other mock item does not; a capture or anchor that includes this flag must expect
+that. `{"guids": "all"}` and `{"episode_shows": "catalog"}` leave them alone.
+
+`twin` is the SECOND server: run another mock on its own port with `--cw-art-fixture twin --seed 2
+--movies 0` (a different machine id and name) and it holds only "Lumen Drift", the same guid at another
+ratingKey (949001). Start the first with `--cw-art-twin PORT` and its `/api/v2/resources` lists the twin
+as well (read from the twin's own `/api/v2/resources` on loopback, at request time), so one signed-in
+mock account has two servers holding one title.
 """
 import argparse
+import colorsys
+import functools
 import calendar
 import datetime
 import hashlib
@@ -274,6 +322,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -333,6 +382,13 @@ RESUME_PART_ID_BASE = 972001
 # --extra-media (990001+); a show takes its seasons at 982000+10k+n and episodes at 984000+100k+e,
 # parts from 981001.
 CAPTION_EDGE_RK_BASE = 980001
+# `--cw-art-fixture` (module doc): five Continue Watching items of one art path each. Item i (0..4) takes
+# 940001+100*i for its show / film, +1 its season, +2 its episode; parts from 941001; the twin server's
+# copy of the shared film is 949001. 940001.. sits clear of the verification ids (to 901009), the
+# enhancement movies (960001..), --extra-media (990001+) and every generated block.
+CW_ART_RK_BASE = 940001
+CW_ART_PART_ID_BASE = 941001
+CW_ART_TWIN_RK = 949001
 # `--multi-version` (module doc): the added versions' media and part ids.
 MULTI_VERSION_ID_BASE = 9_900_000
 CAPTION_EDGE_PART_ID_BASE = 981001
@@ -606,6 +662,14 @@ BAND_FIXTURE_SEED = 20_261_031
 
 # ---------------------------------------------------------------- the generated library ----
 
+def show_episodes_of(items, show_rk):
+    """Every episode in `items` whose show is `show_rk`, in (season, episode) order."""
+    show = [x for x in items.values()
+            if x["type"] == "episode" and x["grandparentRatingKey"] == show_rk]
+    show.sort(key=lambda x: (x["parentIndex"], x.get("index", 0)))
+    return show
+
+
 class Library:
     """Two sections — movies (key 1) and shows (key 2) — with people, genres, collections,
     seasons, episodes, media parts, chapters, markers, watch state and blur colours. Generated
@@ -631,6 +695,11 @@ class Library:
     # band probes, and the per-type `Sort[]` lists a real PMS offers. A class default, so the default
     # library's `__dict__` is unchanged.
     band_fixture = False
+    # `--cw-art-fixture` (module doc): ratingKey -> the art its images are drawn from, and the ratingKeys
+    # that sit in Continue Watching with no resume point (an on-deck "New episode"). Class defaults, so a
+    # default library's `__dict__` is unchanged; `add_cw_art_fixture` sets instance attributes.
+    cw_art = {}
+    cw_extra = frozenset()
 
     def __init__(self, seed=1, movies=48, shows=6, seasons=2, episodes=6, rail_fixture=False,
                  media=None, extra_media=None, loudness_analysis=True, extras=0,
@@ -1248,10 +1317,16 @@ class Library:
         its show after it, in (season, episode) order, as PMS answers; anything else, itself."""
         if it["type"] != "episode":
             return [it]
-        show = [x for x in self.items.values()
-                if x["type"] == "episode" and x["grandparentRatingKey"] == it["grandparentRatingKey"]]
-        show.sort(key=lambda x: (x["parentIndex"], x.get("index", 0)))
+        # Read through `items` alone: tests/test_hud_preview.py calls this unbound on a bare
+        # namespace that holds only `items` and `images`.
+        show = show_episodes_of(self.items, it["grandparentRatingKey"])
         return show[show.index(it):]
+
+    def show_episodes(self, show_rk):
+        """Every episode of the show `show_rk`, in (season, episode) order: the rows of a PlayQueue
+        built from the SHOW (`uri` = the show, `key` = the episode to start on), which holds the
+        episodes before the keyed one as well as after it."""
+        return show_episodes_of(self.items, show_rk)
 
     # --- item builders -------------------------------------------------------------------
 
@@ -1586,9 +1661,24 @@ class Library:
                       key=lambda x: (x["parentIndex"], x.get("index", 0)))
 
     def continue_watching(self):
-        rows = [it for it in self.items.values() if it.get("viewOffset", 0) > 0]
+        rows = [it for it in self.items.values()
+                if it.get("viewOffset", 0) > 0 or int(it["ratingKey"]) in self.cw_extra]
         rows.sort(key=lambda it: -it.get("lastViewedAt", 0))
         return rows
+
+    def cw_art_image(self, url, width, height):
+        """`(content type, PNG bytes)` for an artwork URL of a `--cw-art-fixture` item
+        (`/library/metadata/<rk>/<art|thumb|clearLogo|snapshot>/<ts>`), scaled like the photo transcoder
+        with minSize=1; None for a path that is not one, or an image the item does not have (a 404, as
+        for a real item without a clearLogo)."""
+        segs = [x for x in urllib.parse.urlsplit(url).path.split("/") if x]
+        if len(segs) < 4 or segs[:2] != ["library", "metadata"] or not segs[2].isdigit():
+            return None
+        art = self.cw_art.get(int(segs[2]))
+        kind = art["images"].get(segs[3]) if art else None
+        if kind is None:
+            return None
+        return "image/png", cw_art_png(kind, art["slug"], art["title"], width, height)
 
     def recent(self, kind, n=12):
         rows = [it for it in self.items.values() if it["type"] == kind]
@@ -1952,8 +2042,10 @@ class CatalogLibrary(Library):
                     raise ValueError(f"{slug}: derived {name} is missing ({path}); rerun "
                                      "`python3 tools/demo_library.py derive`")
             if "logo" in rec:
-                # The item's clearLogo, which the app asks for by path
-                # (`/library/metadata/<rk>/clearLogo`), as it does of a real server.
+                # The item's clearLogo. The row's `Image[]` names it at a stamped path
+                # (`_image_list`), which is the one the app asks for; the unstamped
+                # `/library/metadata/<rk>/clearLogo` an older server's rows get is served too, from the
+                # same file (`image` reads the fourth path segment and ignores any stamp).
                 path = demo_derived_file(assets, self.cache, slug, rec, "logo")
                 if not path.is_file():
                     raise ValueError(f"{slug}: derived logo is missing ({path}); rerun "
@@ -1963,6 +2055,8 @@ class CatalogLibrary(Library):
                 it["UltraBlurColors"] = self._blur_of(images["art"])
             self.images[rk] = images
             self.by_slug[slug] = rk
+            if kind in ("movie", "show"):  # a season's and an episode's name their show's (below)
+                it["Image"] = self._image_list(rec["title"], it.get("thumb"), it.get("art"), rk)
             return it
 
         movies, shows = self.sections[0], self.sections[1]
@@ -1997,6 +2091,7 @@ class CatalogLibrary(Library):
                 se.update(index=season["index"], parentRatingKey=show["ratingKey"], parentKey=show["key"],
                           parentTitle=show["title"], parentThumb=show.get("thumb", ""), thumb=show.get("thumb", ""),
                           art=show.get("art", ""), leafCount=0, viewedLeafCount=0)
+                se["Image"] = self._image_list(show["title"], show.get("thumb"), show.get("art"), rk)
                 self.images[srk] = self.images[rk]
                 self.items[srk] = se
                 for e in season["episodes"]:
@@ -2027,6 +2122,8 @@ class CatalogLibrary(Library):
                         ep.update(duration=dur, Media=[media])
                     if "art" in self.images[rk]:
                         self.images[erk]["art"] = self.images[rk]["art"]
+                    ep["Image"] = self._image_list(e["title"], show.get("thumb"), show.get("art"), rk,
+                                                   snapshot=ep.get("thumb"))
                     self.items[erk] = ep
         self._add_empty_collection("Empty Collection")
         self._add_name_fitting_collections()
@@ -2083,6 +2180,26 @@ class CatalogLibrary(Library):
         ends = starts[1:] + [duration]
         return [{"id": n, "index": n, "tag": c["title"], "startTimeOffset": a, "endTimeOffset": b}
                 for n, (c, a, b) in enumerate(zip(marks, starts, ends), start=1)]
+
+    def _image_list(self, title, poster, background, logo_rk, snapshot=None):
+        """A row's `Image[]`, as a modern PMS sends it on every listing and detail row: the
+        `coverPoster` and the `background`, a `clearLogo` ONLY where the title has one (at the
+        STAMPED `/library/metadata/<title rk>/clearLogo/<stamp>` path, which is what the app reads
+        the logo's identity from) and, on an episode, its own `snapshot`. `logo_rk` is the TITLE's
+        key, so a season's or an episode's list names its show's background and logo, as
+        `--cw-art-fixture`'s rows do. A title without a logo carries a list WITHOUT one: that is
+        how the app knows there is nothing to ask for. A row with no list at all reads as an older
+        PMS and gets the legacy `/clearLogo` lookup, which this library answers with a 404 for
+        every title in the catalog's `logo_none_approved`, and a frame dump fails closed on a
+        failed art request."""
+        rows = [{"alt": title, "type": kind, "url": url}
+                for kind, url in (("coverPoster", poster), ("background", background)) if url]
+        if "clearLogo" in self.images.get(logo_rk, {}):
+            rows.append({"alt": title, "type": "clearLogo",
+                         "url": f"/library/metadata/{logo_rk}/clearLogo/{self.now}"})
+        if snapshot:
+            rows.append({"alt": title, "type": "snapshot", "url": snapshot})
+        return rows
 
     @staticmethod
     def _blur_of(path):
@@ -2254,6 +2371,106 @@ def flat_png(w, h, rgb):
 def colour_for(path):
     h = hashlib.sha1(path.encode()).digest()
     return (64 + h[0] % 128, 64 + h[1] % 128, 64 + h[2] % 128)
+
+
+# ---------------------------------------------------------------- `--cw-art-fixture` art ------
+# Synthetic placeholder art for the Continue Watching fixture items, generated at request time, pure
+# stdlib: a per-title gradient, and "wordmark" blocks (a row of bars whose widths and tops follow the
+# letters) standing in for a title treatment. No real image, title treatment or household byte.
+
+CW_ART_ASPECT = {"background": 16 / 9, "snapshot": 16 / 9, "coverArt": 16 / 9,
+                 "poster": 2 / 3, "clearLogo": 5.0}
+CW_ART_DEFAULT_W = {"background": 1280, "snapshot": 640, "coverArt": 1280, "poster": 400, "clearLogo": 1200}
+CW_ART_MAX_W = 1920
+
+
+def cw_art_dims(kind, width, height):
+    """The size the photo transcoder's `minSize=1` gives a source of `kind`'s aspect asked for in a
+    `width` x `height` box: the smallest size that covers the box, the source's aspect kept."""
+    aspect = CW_ART_ASPECT[kind]
+    try:
+        w, h = max(1, int(width)), max(1, int(height))
+    except (TypeError, ValueError):
+        w = CW_ART_DEFAULT_W[kind]
+        return w, max(1, round(w / aspect))
+    ow, oh = (w, round(w / aspect)) if w / h >= aspect else (round(h * aspect), h)
+    if ow > CW_ART_MAX_W:
+        ow, oh = CW_ART_MAX_W, round(CW_ART_MAX_W / aspect)
+    return max(1, ow), max(1, oh)
+
+
+class Raster:
+    """Rows of 8-bit RGB or RGBA pixels: filled rectangles, then a PNG."""
+
+    def __init__(self, w, h, fill, channels):
+        self.w, self.h, self.channels = w, h, channels
+        self.rows = [bytearray(bytes(fill) * w) for _ in range(h)]
+
+    def rect(self, x0, y0, x1, y1, colour):
+        x0, x1 = max(0, x0), min(self.w, x1)
+        if x1 <= x0:
+            return
+        seg = bytes(colour) * (x1 - x0)
+        for y in range(max(0, y0), min(self.h, y1)):
+            self.rows[y][x0 * self.channels:x1 * self.channels] = seg
+
+    def wordmark(self, text, x0, y0, x1, y1, colour):
+        """`text` as bars filling the box: a letter's width and where its bar starts come from the
+        letter, a space is a gap. Readable as nothing, distinct per title."""
+        glyphs = list(text.upper())
+        widths = [3 if c == " " else 3 + ord(c) % 3 for c in glyphs]
+        total = sum(widths) + len(glyphs) - 1
+        scale = (x1 - x0) / max(1, total)
+        top_step = (y1 - y0) // 8
+        at = 0.0
+        for c, gw in zip(glyphs, widths):
+            if c != " ":
+                self.rect(round(x0 + at * scale), y0 + (ord(c) % 3) * top_step,
+                          round(x0 + (at + gw) * scale), y1, colour)
+            at += gw + 1
+
+    def png(self):
+        def chunk(tag, data):
+            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+        raw = b"".join(b"\x00" + bytes(r) for r in self.rows)
+        return (b"\x89PNG\r\n\x1a\n"
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", self.w, self.h, 8, 6 if self.channels == 4 else 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def _cw_tint(slug, value):
+    hue = int(hashlib.md5(slug.encode()).hexdigest()[:6], 16) / 0xFFFFFF
+    return tuple(int(c * 255) for c in colorsys.hsv_to_rgb(hue, 0.55, value))
+
+
+@functools.lru_cache(maxsize=64)
+def _cw_art_png(kind, slug, title, w, h):
+    if kind == "clearLogo":
+        logo = Raster(w, h, (0, 0, 0, 0), 4)
+        logo.wordmark(title, w // 20, h // 8, w - w // 20, h - h // 8, (240, 240, 240, 255))
+        return logo.png()
+    top, bottom = _cw_tint(slug, 0.62), _cw_tint(slug, 0.16)
+    img = Raster(w, h, (0, 0, 0), 3)
+    for y in range(h):
+        t = y / max(1, h - 1)
+        img.rows[y] = bytearray(bytes(round(a + (b - a) * t) for a, b in zip(top, bottom)) * w)
+    if kind == "snapshot":
+        img.rect(w // 3, h // 4, w * 2 // 3, h * 3 // 4, _cw_tint(slug, 0.85))
+    if kind == "coverArt":
+        img.wordmark(title, w // 20, h * 11 // 20, w * 11 // 20, h * 17 // 20, (245, 245, 245))
+    if kind == "poster":
+        img.wordmark(title, w // 10, h * 3 // 5, w * 9 // 10, h * 4 // 5, (245, 245, 245))
+    return img.png()
+
+
+def cw_art_png(kind, slug, title, width=None, height=None):
+    """One fixture image as PNG bytes, sized by `cw_art_dims` for the box asked. `background`,
+    `snapshot` and `coverArt` are opaque 16:9 gradients (a `coverArt` also carries its title baked
+    into the lower part: nothing above it, so no stray mark reads as a UI element on a card); `poster` a 2:3 gradient with
+    the title wordmark; `clearLogo` a transparent 5:1 PNG-alpha wordmark."""
+    w, h = cw_art_dims(kind, width, height)
+    return _cw_art_png(kind, slug, title, w, h)
 
 
 # ---------------------------------------------------------------- PLX-NATIVE-10 (insecure LAN) --
@@ -2448,6 +2665,9 @@ class DiscoverFixture:
                       for n, c in enumerate(self.catalog[:self.LISTED])]
         self.guid_lookup_fails = False
         self.pms_fails = False  # `{"pms": "fail"}`: the PMS side answers 503 (the server-offline capture)
+        # `--cw-art-fixture`: where the mock's own art is reachable from the app (`serve` sets it), the
+        # host of the absolute `coverArt` URLs a title's `Image[]` carries.
+        self.art_base = "http://127.0.0.1"
 
     def by_hex(self, hx):
         return next((c for c in self.catalog if c["hex"] == hx), None)
@@ -2501,6 +2721,11 @@ class DiscoverFixture:
                 return j({"error": "method not allowed"}, 405)
             status, obj = self._listing(segs[3], q, headers)
             return j(obj, status)
+        if len(segs) == 4 and segs[:2] == ["_mock", "art"]:
+            if method != "GET":
+                return j({"error": "method not allowed"}, 405)
+            png = self.art_image(segs[2], segs[3], q.get("width"), q.get("height"))
+            return (200, "image/png", png) if png else (404, "text/plain", b"no image")
         if len(segs) >= 3 and segs[:2] == ["library", "metadata"] and hexid(segs[2]):
             c = self.by_hex(segs[2])
             if c is None:
@@ -2519,6 +2744,9 @@ class DiscoverFixture:
                 e = self._entry(c)
                 e.update({"contentRating": "PG-13", "duration": 6_000_000,
                           "Genre": [{"tag": g} for g in c["genres"]]})
+                images = self._cw_images(c)
+                if images is not None:
+                    e["Image"] = images
                 return j(self._container(size=1, Metadata=[e]))
             return None
         if (len(segs) == 2 and segs[0] == "actions"
@@ -2556,6 +2784,39 @@ class DiscoverFixture:
                     if it.get("guid") in want and (kind is None or it.get("type") == kind)]
             return j({"MediaContainer": {"size": len(rows), "Metadata": rows}})
         return None
+
+    def add_cw_title(self, hx, kind, title, mode, slug):
+        """A `--cw-art-fixture` title's Discover record, off the list (so an add of it is answered, as
+        `_know` does). `mode` is what its `Image[]` carries: `cover` (a `coverArt` with an absolute URL
+        at the mock's own `/_mock/art/`, and a `coverPoster`), `no-cover` (a `coverPoster` only: the
+        record has images, none of them a cover) or `bare` (no `Image` key at all)."""
+        if self.by_hex(hx) is not None:
+            return
+        self.catalog.append({
+            "hex": hx, "guid": f"plex://{kind}/{hx}", "kind": kind, "title": title, "titleSort": title.lower(),
+            "year": 2024, "date": "2024-03-14", "released": True, "held": True, "rating": 7.0,
+            "summary": f"{title} is a synthetic Continue Watching fixture title.", "genres": ["Drama"],
+            "cw_art": {"slug": slug, "discover": mode}})
+
+    def _cw_images(self, c):
+        """`Image[]` of a `--cw-art-fixture` title's record, or None (not one, or `bare`)."""
+        art = c.get("cw_art")
+        if not art or art["discover"] == "bare":
+            return None
+        out = [{"alt": c["title"], "type": "coverPoster", "url": f"/library/metadata/{c['hex']}/thumb/1"}]
+        if art["discover"] == "cover":
+            out.insert(0, {"alt": c["title"], "type": "coverArt",
+                           "url": f"{self.art_base}/_mock/art/{c['hex']}/coverArt.png"})
+        return out
+
+    def art_image(self, hx, name, width, height):
+        """PNG bytes of a title's cover at `/_mock/art/<hex>/coverArt.png`, or None when the title has
+        no cover (or is not a fixture title): what the absolute URL in its `Image[]` names."""
+        c = self.by_hex(hx)
+        art = c.get("cw_art") if c else None
+        if not art or art["discover"] != "cover" or name != "coverArt.png":
+            return None
+        return cw_art_png("coverArt", art["slug"], c["title"], width, height)
 
     DEPARTMENTS = (("Role", "actor", "Actor"), ("Director", "director", "Director"),
                    ("Writer", "writer", "Writer"))
@@ -2688,7 +2949,8 @@ class DiscoverFixture:
         after `guids: all`; the Home hero captures (`home-hero/`) use it for both faces."""
         show = next(c for c in self.catalog if c["kind"] == "show")
         for it in lib.items.values():
-            if it.get("type") == "episode" and it.get("grandparentRatingKey"):
+            if it.get("type") == "episode" and it.get("grandparentRatingKey") \
+                    and int(it["ratingKey"]) not in lib.cw_art:  # the fixture's own show guids stay
                 it["grandparentGuid"] = show["guid"]
 
     def bind_all(self, lib):
@@ -2700,14 +2962,144 @@ class DiscoverFixture:
             hx = hashlib.md5(f"bind-all-{it['ratingKey']}".encode()).hexdigest()[:24]
             return f"plex://{it['type']}/{hx}"
         for it in lib.items.values():
-            if it.get("type") in ("movie", "show") and not re.fullmatch(
-                    r"plex://(movie|show)/[0-9a-f]{24}", it.get("guid") or ""):
+            if it.get("type") in ("movie", "show") and int(it["ratingKey"]) not in lib.cw_art \
+                    and not re.fullmatch(r"plex://(movie|show)/[0-9a-f]{24}", it.get("guid") or ""):
                 it["guid"] = guid_of(it)
                 self._know(it)
         for it in lib.items.values():
-            if it.get("type") == "episode" and it.get("grandparentRatingKey"):
+            if it.get("type") == "episode" and it.get("grandparentRatingKey") \
+                    and int(it["ratingKey"]) not in lib.cw_art:
                 # The show's own guid is a pure function of its rating key (above).
                 it["grandparentGuid"] = guid_of({"type": "show", "ratingKey": it["grandparentRatingKey"]})
+
+
+# ---------------------------------------------------------------- `--cw-art-fixture` ----------
+
+# One entry per art path a 420x236 Continue Watching card can take (module doc). `offset` is the resume
+# point in minutes (None: on deck, "New episode", no resume point); `discover` is what the title's
+# plex.tv Discover record carries (`cover`, `no-cover`, `bare`; None: it has no catalog id at all);
+# `guid` is `hex` (a 24-hex catalog id) or `local` (a `local://` guid); `servers` says which of the two
+# mocks holds it (`a` the primary, `b` the twin).
+CW_ART_FIXTURES = (
+    {"slug": "north-ridge", "kind": "episode", "title": "North Ridge", "episode_title": "Switchback",
+     "season": 2, "episode": 4, "minutes": 95, "offset": 57, "logo": True,
+     "discover": "cover", "guid": "hex", "servers": "a"},
+    {"slug": "lumen-drift", "kind": "movie", "title": "Lumen Drift", "minutes": 111, "offset": 39,
+     "logo": True, "discover": "cover", "guid": "hex", "servers": "ab"},
+    {"slug": "the-quiet-harbour", "kind": "episode", "title": "The Quiet Harbour", "episode_title": "Slack Water",
+     "season": 1, "episode": 7, "minutes": 55, "offset": 14, "logo": True,
+     "discover": "no-cover", "guid": "hex", "servers": "a"},
+    {"slug": "brass-hours", "kind": "episode", "title": "Brass Hours", "episode_title": "First Light",
+     "season": 2, "episode": 1, "minutes": 50, "offset": None, "logo": False,
+     "discover": "bare", "guid": "hex", "servers": "a"},
+    {"slug": "tin-lighthouse", "kind": "movie", "title": "Tin Lighthouse", "minutes": 96, "offset": 30,
+     "logo": True, "discover": None, "guid": "local", "servers": "a"},
+)
+
+
+def cw_art_hex(slug, what="title"):
+    """The 24-hex catalog id of a fixture title (`what="episode"`: its episode's own id)."""
+    return hashlib.md5(f"cw-art-{what}-{slug}".encode()).hexdigest()[:24]
+
+
+def add_cw_art_fixture(pms, role="primary"):
+    """`--cw-art-fixture` (module doc): add the Continue Watching art fixture items to `pms.lib` and
+    their Discover records to `pms.discover`. `role` is `primary` (every fixture title) or `twin` (the
+    titles the second server also holds, at their own ratingKeys). Works on the seeded library and
+    `CatalogLibrary` alike: the items are built here, from `lib`'s sections and its `_media`."""
+    if role not in ("primary", "twin"):
+        raise ValueError("--cw-art-fixture is primary or twin")
+    lib = pms.lib
+    lib.cw_art, lib.cw_extra = {}, set()
+    movies, shows = lib.sections[0], lib.sections[1]
+    part = CW_ART_PART_ID_BASE
+    # The five are the NEWEST watched items, in this order, whatever clock the library runs on.
+    newest = max([it.get("lastViewedAt", 0) for it in lib.items.values()] + [1_700_950_000]) + 1_000
+    for i, spec in enumerate(CW_ART_FIXTURES):
+        if ("b" if role == "twin" else "a") not in spec["servers"]:
+            continue
+        slug, title, is_movie = spec["slug"], spec["title"], spec["kind"] == "movie"
+        ts, hx = 1_700_000_000 + i, cw_art_hex(slug)
+        title_guid = (f"plex://{'movie' if is_movie else 'show'}/{hx}" if spec["guid"] == "hex"
+                      else None)
+        base_rk = CW_ART_TWIN_RK if role == "twin" else CW_ART_RK_BASE + 100 * i
+        duration = spec["minutes"] * 60_000
+        part += 1
+
+        def wire(rk, kind, section, name, **more):
+            it = {"ratingKey": str(rk), "key": f"/library/metadata/{rk}", "type": kind, "title": name,
+                  "titleSort": name.lower(), "librarySectionTitle": section["title"],
+                  "librarySectionID": int(section["key"]), "librarySectionKey": f"/library/sections/{section['key']}",
+                  "summary": f"{name} is a synthetic Continue Watching fixture title.", "year": 2024,
+                  # Older than every generated item, so no "Recently Added" shelf changes order.
+                  "addedAt": 1_600_000_000 + i, "updatedAt": 1_600_000_000 + i,
+                  "UltraBlurColors": lib._blur(random.Random(rk)),
+                  "Genre": [], "Director": [], "Writer": [], "Role": [], "Country": [], "Rating": []}
+            it.update(more)
+            return it
+
+        def path(rk, role_):
+            return f"/library/metadata/{rk}/{role_}/{ts}"
+
+        def image_list(name, poster, background, logo, snapshot):
+            rows = [{"alt": name, "type": "coverPoster", "url": poster},
+                    {"alt": name, "type": "background", "url": background}]
+            if logo:
+                rows.append({"alt": name, "type": "clearLogo", "url": logo})
+            rows.append({"alt": name, "type": "snapshot", "url": snapshot})
+            return rows
+
+        def own_art(rk):
+            """The title's own images: poster, backdrop and (where it has one) clearLogo."""
+            lib.cw_art[rk] = {"slug": slug, "title": title, "images": dict(
+                {"thumb": "poster", "art": "background", "snapshot": "snapshot"},
+                **({"clearLogo": "clearLogo"} if spec["logo"] else {}))}
+
+        watch = {"lastViewedAt": newest - 100 * i}
+        if spec["offset"] is not None:
+            watch["viewOffset"] = spec["offset"] * 60_000
+        if is_movie:
+            own_art(base_rk)
+            lib.items[base_rk] = wire(
+                base_rk, "movie", movies, title, originallyAvailableAt="2024-03-14", duration=duration,
+                contentRating="PG-13", Chapter=[], Marker=[],
+                Media=lib._media(random.Random(base_rk), base_rk, part, duration),
+                guid=title_guid or f"local://{base_rk}",
+                thumb=path(base_rk, "thumb"), art=path(base_rk, "art"),
+                Image=image_list(title, path(base_rk, "thumb"), path(base_rk, "art"),
+                                 path(base_rk, "clearLogo") if spec["logo"] else None, path(base_rk, "snapshot")),
+                **watch)
+        else:
+            show_rk, season_rk, ep_rk = base_rk, base_rk + 1, base_rk + 2
+            own_art(show_rk)
+            show = wire(show_rk, "show", shows, title, guid=title_guid, originallyAvailableAt="2024-01-01",
+                        duration=0, childCount=0, leafCount=0, viewedLeafCount=0,
+                        thumb=path(show_rk, "thumb"), art=path(show_rk, "art"))
+            season = wire(season_rk, "season", shows, f"Season {spec['season']}", guid=f"plex://season/{cw_art_hex(slug, 'season')}",
+                          index=spec["season"], parentRatingKey=str(show_rk), parentKey=show["key"],
+                          parentTitle=title, parentThumb=show["thumb"], thumb=show["thumb"], art=show["art"],
+                          leafCount=0, viewedLeafCount=0)
+            # The episode's still is its own (`thumb`); its `art`, `Image[]` background and clearLogo are its
+            # SHOW's, and `grandparentGuid` is the show's catalog id: the key a cover is read by.
+            lib.cw_art[ep_rk] = {"slug": slug, "title": title, "images": {"thumb": "snapshot", "snapshot": "snapshot"}}
+            episode = wire(
+                ep_rk, "episode", shows, spec["episode_title"], guid=f"plex://episode/{cw_art_hex(slug, 'episode')}",
+                grandparentGuid=title_guid, index=spec["episode"], parentIndex=spec["season"],
+                parentRatingKey=str(season_rk), parentKey=season["key"], parentTitle=season["title"],
+                grandparentRatingKey=str(show_rk), grandparentKey=show["key"], grandparentTitle=title,
+                grandparentThumb=show["thumb"], grandparentArt=show["art"], parentThumb=show["thumb"],
+                originallyAvailableAt="2024-03-14", duration=duration, contentRating="TV-14",
+                Chapter=[], Marker=[], Media=lib._media(random.Random(ep_rk), ep_rk, part, duration),
+                thumb=path(ep_rk, "thumb"), art=show["art"],
+                Image=image_list(spec["episode_title"], show["thumb"], show["art"],
+                                 path(show_rk, "clearLogo") if spec["logo"] else None, path(ep_rk, "snapshot")),
+                **watch)
+            lib.items.update({show_rk: show, season_rk: season, ep_rk: episode})
+            if spec["offset"] is None:
+                lib.cw_extra.add(ep_rk)
+        if spec["discover"] is not None:
+            pms.discover.add_cw_title(hx, "movie" if is_movie else "show", title, spec["discover"], slug)
+    lib._roll_up()
 
 
 LIBRARY_IDENTIFIER = "com.plexapp.plugins.library"
@@ -2773,6 +3165,35 @@ class MockPms:
         return hubs
 
 
+    @staticmethod
+    def _twin_resources(port):
+        """The resource row(s) a `--cw-art-fixture twin` mock on loopback `port` answers for itself:
+        read at request time, so the start order of the two mocks does not matter. A twin that does
+        not answer lists nothing (one server, as ever); only loopback is ever dialled."""
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/api/v2/resources", timeout=2) as r:
+                rows = json.load(r)
+        except (OSError, ValueError):
+            return []
+        return [row for row in rows if isinstance(row, dict)]
+
+    def cw_art_photo(self, q, lib):
+        """`/photo/:/transcode` of a `--cw-art-fixture` image, or None when the `url=` is not one: an
+        ABSOLUTE url whose path is the mock's `/_mock/art/<hex>/coverArt.png` (the PMS fetches the
+        absolute url and transcodes it; the mock resolves it by path and never dials out, whatever the
+        host in it), or a fixture item's own `/library/metadata/<rk>/<art|thumb|clearLogo|snapshot>`
+        (an image the item lacks, its clearLogo, is a 404 as on a real server)."""
+        url = q.get("url", "")
+        segs = [x for x in urllib.parse.urlsplit(url).path.split("/") if x]
+        if len(segs) == 4 and segs[:2] == ["_mock", "art"]:
+            png = self.discover.art_image(segs[2], segs[3], q.get("width"), q.get("height"))
+            return (200, "image/png", png) if png else (404, "text/plain", b"no image")
+        if len(segs) >= 4 and segs[:2] == ["library", "metadata"] and segs[2].isdigit() \
+                and int(segs[2]) in lib.cw_art:
+            img = lib.cw_art_image(url, q.get("width"), q.get("height"))
+            return (200, *img) if img else (404, "text/plain", b"no image")
+        return None
+
     def account_token(self):
         """The plex.tv token the sign-in hands out: Demo's, or SECOND_ACCOUNT's under `--second-account`."""
         return SECOND_ACCOUNT_TOKEN if self.second_account else DEMO_ACCOUNT_TOKEN
@@ -2795,6 +3216,7 @@ class MockPms:
         self.lock = threading.Lock()
         self.link = link_conditioner.Conditioner()  # `--link`; a no-op until a profile is set
         self.play_queues = {}  # retained snapshots for GET /playQueues/<id>?center=<item id>
+        self.play_queue_selected = {}  # queue id -> the playQueueItemID its POST selected
         self.wire_log = []  # `GET /_mock/wire`: per-request arrival/finish times under the link
         self.requests = []  # (path, status) in arrival order, for the harness
         # `/:/eventsource/notifications` (the PMS SSE feed): one queue per open stream, fed by
@@ -2806,6 +3228,9 @@ class MockPms:
         self.writes = []
         # Set by `serve` after binding the listener; ordinary sign-in advertises only this mock.
         self.account_resource = None
+        # `--cw-art-twin PORT`: loopback ports of `--cw-art-fixture twin` mocks whose own resource row
+        # `/api/v2/resources` lists after this server's, so one account holds two servers.
+        self.cw_art_twin_ports = ()
         # The specialized TLS-failure reproduction overrides ordinary resource discovery.
         # Set by `serve(..., plaintext_only_lan=True)` to ip/http_port/fail_port/access_token.
         self.plaintext_only_lan = None
@@ -3230,7 +3655,10 @@ class MockPms:
                 cfg = self.plaintext_only_lan
                 return j(plaintext_only_lan_resources(
                     lib, cfg["ip"], cfg["http_port"], cfg["fail_port"], cfg["access_token"]))
-            return j([self.account_resource] if self.account_resource is not None else [])
+            rows = [self.account_resource] if self.account_resource is not None else []
+            for port in self.cw_art_twin_ports:
+                rows += self._twin_resources(port)
+            return j(rows)
         catalog = isinstance(lib, CatalogLibrary)
         if p == "/" or p == "/identity":
             return j(self.container(machineIdentifier=lib.machine, friendlyName=lib.friendly,
@@ -3342,6 +3770,9 @@ class MockPms:
                                "&sort=originallyAvailableAt,year:nullsLast",
                         "Metadata": members})
                 return j(self.container(Hub=hubs))
+            if rk in lib.cw_art:  # `--cw-art-fixture`: a missing image (no clearLogo) is a 404
+                img = lib.cw_art_image(p, q.get("width"), q.get("height"))
+                return (200, *img) if img else (404, "text/plain", b"no image")
             if catalog:
                 img = lib.image(p, q.get("width"), q.get("height"))
                 return (200, *img) if img else (404, "text/plain", b"no image")
@@ -3452,6 +3883,8 @@ class MockPms:
             lim = q.get("limit", "")
             return j(self.container(Hub=lib.search(q.get("query", ""), int(lim) if lim.isdigit() else 3,
                                                    include_collections=q.get("includeCollections") == "1")))
+        if p == "/photo/:/transcode" and (hit := self.cw_art_photo(q, lib)) is not None:
+            return hit
         if p == "/photo/:/transcode" and catalog:
             img = lib.image(q.get("url", ""), q.get("width"), q.get("height"))
             if img is None:
@@ -3495,11 +3928,24 @@ class MockPms:
             uri = q.get("uri", "")
             rk = uri.rsplit("/", 1)[-1]
             it = lib.items.get(int(rk)) if rk.isdigit() else None
+            key_rk = q.get("key", "").rsplit("/", 1)[-1]
+            keyed = lib.items.get(int(key_rk)) if key_rk.isdigit() else None
+            selected = 0
             # Only the demo library follows `continuous=1` past the item, and the verification show
             # under `--media-next-episode`: the seeded library's queue of one is what the
             # harness's recorded cases were taken against.
             if it is None:
                 queue = []
+            elif (it["type"] == "show" and keyed is not None and keyed["type"] == "episode"
+                    and keyed["grandparentRatingKey"] == str(it["ratingKey"])
+                    and (isinstance(lib, CatalogLibrary)
+                         or (getattr(lib, "media_next_episode", False)
+                             and str(it["ratingKey"]) == str(VERIFY_SHOW_RK)))):
+                # The queue the app builds an episode's from: the SHOW as the `uri` and the episode
+                # as the `key` ("the first item to play"), the episodes before it included, the
+                # keyed one selected (docs/pms-api.md, "A show-keyed PlayQueue").
+                queue = lib.show_episodes(str(it["ratingKey"]))
+                selected = queue.index(keyed)
             elif q.get("continuous") == "1" and (
                     isinstance(lib, CatalogLibrary)
                     or (getattr(lib, "media_next_episode", False)
@@ -3510,19 +3956,21 @@ class MockPms:
             rows = [dict(x, playQueueItemID=n) for n, x in enumerate(queue, start=1)]
             with self.lock:
                 self.play_queues[1] = rows
-            return j(self.container(Metadata=rows, playQueueID=1, playQueueSelectedItemID=1,
-                                    playQueueSelectedItemOffset=0, playQueueTotalCount=len(rows),
+                self.play_queue_selected[1] = selected + 1
+            return j(self.container(Metadata=rows, playQueueID=1, playQueueSelectedItemID=selected + 1,
+                                    playQueueSelectedItemOffset=selected, playQueueTotalCount=len(rows),
                                     playQueueVersion=1))
         if segs[:1] == ["playQueues"] and len(segs) == 2:
             queue_id = int(segs[1]) if segs[1].isdigit() else 1
             with self.lock:
                 rows = list(self.play_queues.get(queue_id, []))
+                selected = self.play_queue_selected.get(queue_id, 1)
             center = int(q.get("center", "1")) if q.get("center", "1").isdigit() else 1
             window = int(q.get("window", "50")) if q.get("window", "50").isdigit() else 50
             at = next((n for n, row in enumerate(rows) if row["playQueueItemID"] == center), 0)
             page = rows[max(0, at - window):at + window + 1]
             return j(self.container(Metadata=page, playQueueID=queue_id, playQueueTotalCount=len(rows),
-                                    playQueueSelectedItemID=1, playQueueSelectedItemOffset=0))
+                                    playQueueSelectedItemID=selected, playQueueSelectedItemOffset=selected - 1))
         if p.startswith("/library/parts/"):
             part_id = int(segs[2]) if len(segs) > 2 and segs[2].isdigit() else -1
             if method == "PUT":
@@ -3977,7 +4425,7 @@ def serve(port, seed=1, host="127.0.0.1", verbose=False, movies=48, rail_fixture
           resume_fixture=False, media_next_episode=False, next_episode_remux=False,
           media_forced_subtitle=False, smart_collections=False,
           caption_edge_cases=False, multi_version=False, band_fixture=False, extra_media_audio=None,
-          extra_media_subtitle=None):
+          extra_media_subtitle=None, cw_art_fixture=None, cw_art_twin=()):
     """Start a mock PMS in a daemon thread; returns (server, pms). Loopback only by default: the
     app on the simulator is on this machine, and a LAN-facing listener would be one more thing
     the outbound guard has to reason about. `catalog` serves the demo library instead of a seed.
@@ -4013,7 +4461,8 @@ def serve(port, seed=1, host="127.0.0.1", verbose=False, movies=48, rail_fixture
     `media_next_episode`); `media_forced_subtitle` flags the English subtitle of the verification
     episodes forced (module doc; needs `media`). `band_fixture` spreads dates, ratings and watch
     state for the value-sort rail's band probes and serves the per-type `Sort[]` lists (module doc;
-    seeded library only)."""
+    seeded library only). `cw_art_fixture` (`primary` or `twin`) adds the Continue Watching art fixture
+    (module doc); `cw_art_twin` lists the loopback ports of twin mocks this one's `/api/v2/resources` names too."""
     if transcode_fixture is not None and not pathlib.Path(transcode_fixture).is_file():
         raise ValueError(f"--transcode-fixture file is missing: {transcode_fixture}")
     if catalog is not None:
@@ -4031,6 +4480,9 @@ def serve(port, seed=1, host="127.0.0.1", verbose=False, movies=48, rail_fixture
                       extra_media_subtitle=extra_media_subtitle)
     lib.smart_collections = smart_collections
     pms = MockPms(lib)
+    if cw_art_fixture:
+        add_cw_art_fixture(pms, cw_art_fixture)
+    pms.cw_art_twin_ports = tuple(cw_art_twin)
     pms.link = link_conditioner.Conditioner(seed=seed)
     for spec in link:
         klass, profile = link_conditioner.parse_spec(spec)
@@ -4059,6 +4511,7 @@ def serve(port, seed=1, host="127.0.0.1", verbose=False, movies=48, rail_fixture
     srv.insecure_fail_listener = None
     account_ip = advertise_ip or ("127.0.0.1" if host in ("0.0.0.0", "::") else host)
     account_port = advertise_port or srv.server_address[1]
+    pms.discover.art_base = f"http://{account_ip}:{account_port}"  # the host of a coverArt url
     pms.account_resource = {
         "name": lib.friendly, "clientIdentifier": lib.machine, "provides": "server",
         "owned": True, "home": False, "ownerId": 1, "presence": True,
@@ -4338,6 +4791,28 @@ def selftest():
     assert window["playQueueSelectedItemID"] == 1, "centering a window must not select it"
     assert queue_keys(next_base, V3_RATING_KEY) == [V3_RATING_KEY]
     assert queue_keys(next_base, V1_RATING_KEY, continuous=False) == [V1_RATING_KEY]
+    # A queue built from the SHOW with the episode as its `key` (what the app asks for an episode,
+    # so Previous has a row to go to): the whole show in order, the keyed episode selected.
+    def show_queue(base, show_rk, key_rk):
+        uri = urllib.parse.quote(f"server://machine/com.plexapp.plugins.library/library/metadata/{show_rk}")
+        key = urllib.parse.quote(f"/library/metadata/{key_rk}")
+        request = urllib.request.Request(
+            base + f"/playQueues?type=video&uri={uri}&key={key}&shuffle=0&repeat=0", method="POST")
+        return json.load(urllib.request.urlopen(request))["MediaContainer"]
+
+    keyed = show_queue(next_base, VERIFY_SHOW_RK, V3_RATING_KEY)
+    assert [int(row["ratingKey"]) for row in keyed["Metadata"]] == [V1_RATING_KEY, V3_RATING_KEY]
+    assert (keyed["playQueueSelectedItemID"], keyed["playQueueSelectedItemOffset"]) == (2, 1), \
+        "the keyed episode is selected, with the first one before it"
+    window = json.load(urllib.request.urlopen(next_base + "/playQueues/1?center=2&window=5&own=0"))["MediaContainer"]
+    assert [row["playQueueItemID"] for row in window["Metadata"]] == [1, 2]
+    assert window["playQueueSelectedItemID"] == 2, "a window read keeps the POST's selection"
+    first = show_queue(next_base, VERIFY_SHOW_RK, V1_RATING_KEY)
+    assert first["playQueueSelectedItemOffset"] == 0, "the first episode has nothing before it"
+    movie = show_queue(next_base, VERIFY_SHOW_RK, V2_RATING_KEY)["Metadata"]
+    assert [int(row["ratingKey"]) for row in movie] == [VERIFY_SHOW_RK], \
+        "a key that is not one of the show's episodes does not make a queue of the show"
+    assert queue_keys(next_base, V1_RATING_KEY) == [V1_RATING_KEY, V3_RATING_KEY], "the episode ask is unchanged"
     assert queue_keys(next_base, V2_RATING_KEY) == [V2_RATING_KEY], "a movie never follows a show"
     first_part, first_streams = part_streams(next_base, V1_RATING_KEY)
     second_part, second_streams = part_streams(next_base, V3_RATING_KEY)
@@ -4993,9 +5468,21 @@ def main():
                          "have no rating, no release date or no view, and the per-type Sort[] lists "
                          "a real PMS offers (seeded library only), for the value-sort rail's band "
                          "probes. Default off: every other answer is byte-identical")
+    ap.add_argument("--cw-art-fixture", nargs="?", const="primary", choices=("primary", "twin"),
+                    help="five Continue Watching items, one per art path of a 420x236 card (a Discover "
+                         "coverArt; a background plus clearLogo; the title in type; a guid-less item), the "
+                         "dedicated titles carrying 24-hex Watchlist-eligible guids, and the Discover "
+                         "stand-in's `Image[]` with an absolute coverArt url the mock serves. `twin` is the "
+                         "second server, holding only the title both hold. Default off: every other answer "
+                         "is byte-identical")
+    ap.add_argument("--cw-art-twin", type=int, action="append", default=[], metavar="PORT",
+                    help="with --cw-art-fixture: also list the `--cw-art-fixture twin` mock on loopback "
+                         "PORT in /api/v2/resources (repeatable)")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
+    if a.cw_art_twin and a.cw_art_fixture != "primary":
+        ap.error("--cw-art-twin needs --cw-art-fixture (primary)")
     if a.hero and a.catalog is None:
         ap.error("--hero needs --catalog")
     if a.resume_fixture and a.catalog is not None:
@@ -5067,7 +5554,8 @@ def main():
                          media_forced_subtitle=a.media_forced_subtitle,
                          smart_collections=a.smart_collections,
                          caption_edge_cases=a.caption_edge_cases, multi_version=a.multi_version,
-                         band_fixture=a.band_fixture)
+                         band_fixture=a.band_fixture, cw_art_fixture=a.cw_art_fixture,
+                         cw_art_twin=a.cw_art_twin)
     except ValueError as e:
         ap.error(str(e))
     what = f"catalog={a.catalog}" if a.catalog else f"seed={a.seed}"

@@ -158,6 +158,40 @@
       "comment": "Frames while server pages land under MOVING focus (#567): Home's Recently Added Movies row holds a 24-card window and fetches the next 12 when focus nears the end. Run it with `./tests/run.py --fps --mock --filter home-recent-paging` (starts tests/mock_pms.py --movies 300 itself, no Plex account, mock only). `plxnative-grid` seats row 0 (Continue Watching), so the row walk presses Down `row_down` (1) time to reach Recently Added Movies, then Right 96 times at 0.33 s (96 / 12 = 8 page landings expected), rests 4 s, and Left 96 times back. Keys are only ever down/right/left, never ok or back. The result prints the window's heartbeat fps median/min, frame_gt33, the worst frame, p99 and the number of page landings (`hubs: landed` lines) in the window; frame_gt33 is NOT graded yet. The scene FAILS with `paging did not happen` when the forward half saw fewer than 6 landings (min_page_landings). loop_floor and fps_floor are BORROWED from home-grid-deep, not measured for this scene. run_secs covers the walk (tests hold it to walk_secs_needed)."
     },
     {
+      "name": "home-cw-row-walk",
+      "tier": "ui",
+      "route": "home",
+      "loop_floor": 50,
+      "fps_floor": 20,
+      "run_secs": 70,
+      "warmup_s": 5,
+      "triggers": {
+        "plxnative-grid": true,
+        "plxnative-focus": true,
+        "plxnative-focusx": true,
+        "plxnative-framedrop": 25
+      },
+      "mock": {
+        "cw_art_fixture": true,
+        "only": true
+      },
+      "walk": {
+        "row_down": 0,
+        "cards": 12,
+        "key_gap_s": 0.33,
+        "land_wait_s": 15,
+        "settle_s": 3,
+        "rest_s": 4,
+        "tail_s": 5,
+        "min_page_landings": 0,
+        "reach": {
+          "route": "home",
+          "min_global": 10
+        }
+      },
+      "comment": "The Continue Watching stills row scrolled sideways, against the SYNTHETIC mock only: `./tests/run.py --fps --mock --filter home-cw-row-walk` starts tests/mock_pms.py --cw-art-fixture itself (five fixture titles, one per art path a stills card takes, head the mock's seven in-progress items: 12 cards) and needs no Plex account. `plxnative-grid` seats row 0, the Continue Watching row, so the walk presses Right 12 times at 0.33 s (the focus pop, the footer cue slot and the row's horizontal scroll, with the cover / composite art of each card entering the window as it scrolls: the FIRST pass is the cold one, the art is read from the mock and baked on arrival), rests 4 s, and presses Left 12 times back (the same cards from the warm cache). Keys are only ever right/left, never ok or back: a Continue Watching card resumes playback on OK. `walk.reach` fails the scene when the focused card never reaches item 10 of the row (`plxnative-focusx` logs its source index), and `min_page_landings` is 0 because this row does not page. The fps floor and loop floor are home-recent-paging's (borrowed from home-grid, see its notes), not measured for this scene. run_secs covers the walk (tests hold it to walk_secs_needed)."
+    },
+    {
       "name": "home-recent-paging-held",
       "tier": "ui",
       "route": "home",
@@ -4996,9 +5030,7 @@
         "acodec": "aac",
         "fps": 24.0
       },
-      "triggers": {
-        "ptype": "0"
-      },
+      "triggers": {},
       "run_secs": 75,
       "operations": [
         {
@@ -5014,7 +5046,7 @@
         "uri_presented": true,
         "uri_service_playing": true
       },
-      "_uri_note": "PRODUCTION ROUTE (debug builds, `--guest --mock`). The same 20 Mbit/s HLS stream as pipe_uri_hls_720p24_20m_bound, but played by the PRODUCTION URI backend instead of the developer probe: the app resolves the carrier clip (`carrier`, a 90 s 720p24 progressive twin on the harness's own mock PMS, ratingKey 990001), the dev route (`plxnative-uridev`, written by the runner) answers the qualification with the fixture's URL, and the backend binds the ACB plane (`ptype=0`) and plays it. The runner writes `part=` from the carrier, `pms=` from the configured mock address (the origin the app's own client holds), `url=` from the fixture server, pins `quality=original` and `audioenh=off`, never arms `uriprobe`, and deletes `plxnative-uridev` afterwards. Graded from `uri-trace:` lines (the probe's event text under a new prefix) and the lines production writes: `uri: service playing`, `uri: presented (... from P to N ms)` with N > P, `videoplane: BOUND`, and the display and PLAYING ACB tasks read from the log, each with an `acb callback ... ev=1`. The probe pair stays as the instrument baseline; compare the two on the same stream."
+      "_uri_note": "PRODUCTION ROUTE (debug builds, `--guest --mock`). The same 20 Mbit/s HLS stream as pipe_uri_hls_720p24_20m_bound, but played by the PRODUCTION URI backend instead of the developer probe: the app resolves the carrier clip (`carrier`, a 90 s 720p24 progressive twin on the harness's own mock PMS, ratingKey 990001), the dev route (`plxnative-uridev`, written by the runner) answers the qualification with the fixture's URL, and the backend binds the ACB plane over the URI engine's own player-type-0 handle (created when its first play is offered, not by the boot; no `ptype` trigger) and plays it. The runner writes `part=` from the carrier, `pms=` from the configured mock address (the origin the app's own client holds), `url=` from the fixture server, pins `quality=original` and `audioenh=off`, never arms `uriprobe`, and deletes `plxnative-uridev` afterwards. Graded from `uri-trace:` lines (the probe's event text under a new prefix) and the lines production writes: `uri: service playing`, `uri: presented (... from P to N ms)` with N > P, `videoplane: BOUND`, and the display and PLAYING ACB tasks read from the log, each with an `acb callback ... ev=1`. The probe pair stays as the instrument baseline; compare the two on the same stream."
     },
     {
       "name": "pipe_uri_product_hls_720p24_20m_bound_collapse",
@@ -5034,9 +5066,7 @@
         "acodec": "aac",
         "fps": 24.0
       },
-      "triggers": {
-        "ptype": "0"
-      },
+      "triggers": {},
       "network_profile": [
         {
           "until_s": 25.0,
@@ -5061,7 +5091,7 @@
         "uri_presented": true,
         "uri_service_playing": true
       },
-      "_uri_note": "PRODUCTION ROUTE (debug builds, `--guest --mock`). The same 20 Mbit/s HLS stream as pipe_uri_hls_720p24_20m_bound_collapse, but played by the PRODUCTION URI backend instead of the developer probe: the app resolves the carrier clip (`carrier`, a 90 s 720p24 progressive twin on the harness's own mock PMS, ratingKey 990001), the dev route (`plxnative-uridev`, written by the runner) answers the qualification with the fixture's URL, and the backend binds the ACB plane (`ptype=0`) and plays it. The runner writes `part=` from the carrier, `pms=` from the configured mock address (the origin the app's own client holds), `url=` from the fixture server, pins `quality=original` and `audioenh=off`, never arms `uriprobe`, and deletes `plxnative-uridev` afterwards. Graded from `uri-trace:` lines (the probe's event text under a new prefix) and the lines production writes: `uri: service playing`, `uri: presented (... from P to N ms)` with N > P, `videoplane: BOUND`, and the display and PLAYING ACB tasks read from the log, each with an `acb callback ... ev=1`. The probe pair stays as the instrument baseline; compare the two on the same stream."
+      "_uri_note": "PRODUCTION ROUTE (debug builds, `--guest --mock`). The same 20 Mbit/s HLS stream as pipe_uri_hls_720p24_20m_bound_collapse, but played by the PRODUCTION URI backend instead of the developer probe: the app resolves the carrier clip (`carrier`, a 90 s 720p24 progressive twin on the harness's own mock PMS, ratingKey 990001), the dev route (`plxnative-uridev`, written by the runner) answers the qualification with the fixture's URL, and the backend binds the ACB plane over the URI engine's own player-type-0 handle (created when its first play is offered, not by the boot; no `ptype` trigger) and plays it. The runner writes `part=` from the carrier, `pms=` from the configured mock address (the origin the app's own client holds), `url=` from the fixture server, pins `quality=original` and `audioenh=off`, never arms `uriprobe`, and deletes `plxnative-uridev` afterwards. Graded from `uri-trace:` lines (the probe's event text under a new prefix) and the lines production writes: `uri: service playing`, `uri: presented (... from P to N ms)` with N > P, `videoplane: BOUND`, and the display and PLAYING ACB tasks read from the log, each with an `acb callback ... ev=1`. The probe pair stays as the instrument baseline; compare the two on the same stream."
     },
     {
       "name": "pipe_uri_product_hls_720p24_2a_audio2",
@@ -5082,9 +5112,7 @@
         "acodec": "aac",
         "fps": 24.0
       },
-      "triggers": {
-        "ptype": "0"
-      },
+      "triggers": {},
       "run_secs": 45,
       "operations": [
         {
@@ -5124,9 +5152,7 @@
         "acodec": "aac",
         "fps": 24.0
       },
-      "triggers": {
-        "ptype": "0"
-      },
+      "triggers": {},
       "run_secs": 45,
       "operations": [
         {

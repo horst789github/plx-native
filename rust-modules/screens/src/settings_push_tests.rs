@@ -176,10 +176,10 @@ fn not_held() -> [(SettingsPage, &'static str); 2] {
     ]
 }
 
-const PICKERS: [PickerKind; 17] = [
-    PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::HdrOverlay,
+const PICKERS: [PickerKind; 19] = [
+    PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::SubtitleColor, PickerKind::HdrOverlay,
     PickerKind::NextEpisode, PickerKind::SkipInterval, PickerKind::DeckPress, PickerKind::AudioLanguage, PickerKind::SubtitleMode,
-    PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles, PickerKind::UiResolution, PickerKind::InstantDpadSeeking,
+    PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles, PickerKind::UiResolution, PickerKind::InstantDpadSeeking, PickerKind::UriEngine,
     PickerKind::DolbyVision, PickerKind::IntroSkip, PickerKind::CreditsSkip,
 ];
 

@@ -18,7 +18,14 @@ impl Host for HomeHost {
     type Init = super::super::family::NoInit;
     type Memory = PageMemory;
 }
+impl crate::registry::ScreenInputsLike for HomeHost {
+    fn screen_inputs<'a>(_cx: &Cx<'a, Self>) -> &'a crate::registry::ScreenInputs {
+        crate::registry::empty_fixture()
+    }
+}
+
 impl HomeLike for HomeHost {
+    fn clock_facts<'a>(_cx: &Cx<'a, Self>) -> Option<&'a plx_plex::plex::ClockFacts> { None }
     fn hubs<'a>(cx: &Cx<'a, Self>) -> HubsView<'a> { cx.views }
 }
 
@@ -67,6 +74,12 @@ impl Harness {
         let mem = Screen::<HomeHost>::memory_at(&*self.screen.borrow(), None);
         self.step(ScreenEvent::RestoreMemory(mem));
         self.focus(first, By::Restore);
+        // The Continue Watching row stands on the hero's page too, so a restore onto it no longer
+        // opens the grid: the harness puts the page on the grid itself (the page this harness
+        // exercises the shelf's card mechanisms on).
+        let screen = self.screen.get_mut();
+        screen.snap_target = 1.0;
+        screen.snap.jump(1.0);
         self.tick(30);
         self.focus = None;
         self.tick(240);
@@ -81,7 +94,7 @@ impl Harness {
     fn step(&mut self, ev: ScreenEvent<HomeHost>) -> bool {
         let mut present = plx_machine::present::Present::new();
         let mut out = Vec::new();
-        let (_, moving) = plx_machine::idle::scoped_motion(|| {
+        let (_, moving) = plx_machine::motion::report::scoped_motion(|| {
             let cx = Cx::<HomeHost> { views: self.snap.view(), tick: Tick { ms: self.ms, dt_us: 16_667 }, measure: &FixtureMeasure,
                 press: PressRead { scale: self.press, owner: self.focus, ..Default::default() },
                 focus: FocusRead { current: self.focus, ..Default::default() }, owner: InputOwner::Entry(ENTRY) };

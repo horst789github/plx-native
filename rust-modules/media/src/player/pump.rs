@@ -1139,10 +1139,9 @@ fn pump_frame(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::P
     // maps its worker token to the current attempt and settles the route, after installation.
     pa.drain_load_outcomes(ps);
     if let Some(attempt) = pa.active_feed_attempt() {
-        let snapshot = super::timeline::TimelineSnapshot::from_content_ns(
-            ps.readout().raw().playpos_ns,
+        let snapshot = super::timeline::TimelineSnapshot::from_feed(
+            ps.readout(),
             super::duration_ns(ps).unwrap_or(0),
-            ps.readout().paused(),
         );
         pa.publish_timeline(attempt, snapshot);
     }
@@ -1311,10 +1310,52 @@ fn pump_frame(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::P
             finish_preview_open_failure(ps, pa);
             return;
         }
-        let loading = ps.readout().raw().load.loading();
-        let run = recover_failed_open(ps, loading, super::recovery::LoadRefusal::SourceFailed, None, "");
-        if let OpenRecoveryRun::DecodeInApp { offset_ns } = run {
-            decode_in_app(ps, pa, offset_ns);
+        let raw = ps.readout().raw();
+        let loading = raw.load.loading();
+        // The conditional codec probe: the demuxer refused a stream whose BYTES disagree with the
+        // Load's declaration — a stale PMS track list (a file replaced under the server, never
+        // re-analyzed) or a transcode whose output the route described from the source's record —
+        // and recorded what the file really carries. Reload ONCE with the corrected declaration:
+        // a healthy open never sets the probe, so a healthy start pays nothing for this. The
+        // probe rides the same sample as the `demux_failed` flag that gates this branch — the
+        // demuxer publishes it before that flag — so a flag without its probe is impossible.
+        let probe_v = raw.probe_actual_video;
+        let probe_a = raw.probe_actual_audio;
+        let retry_position = raw.seek_target_ns.unwrap_or(raw.playpos_ns);
+        if (probe_v != 0 || probe_a != 0) && crate::route::take_codec_probe_retry(ps) {
+            if probe_v != 0 {
+                let v = match probe_v {
+                    1 => "h264",
+                    2 => "hevc",
+                    3 => "av1",
+                    _ => "vp9",
+                };
+                crate::route::set_stream_vcodec(ps, v);
+            }
+            if probe_a != 0 {
+                let a = match probe_a {
+                    1 => "ac3",
+                    2 => "eac3",
+                    3 => "aac",
+                    _ => "dts",
+                };
+                crate::route::set_stream_acodec(ps, a);
+            }
+            super::log(&format!(
+                "probe retry: the demuxer refused a stale declaration (video probe={probe_v}, audio probe={probe_a}); one reload with the codec the file really carries"
+            ));
+            // `reload_at` tears the failed Engine down — Starting -> Prepared keeps the same
+            // transaction, so the retry mints a fresh attempt — reopens the same URL and
+            // re-issues the Load with the corrected payload. Its teardown also clears
+            // `demux_failed`, so this hook cannot re-fire for the attempt it is correcting;
+            // if the corrected Load is refused too, the one-shot guard hands the next
+            // mismatch to the ordinary failure read-out instead of a loop.
+            let _ = settle_reload(super::engine::reload_at(ps, pa, retry_position), "probe retry reload", ps);
+        } else {
+            let run = recover_failed_open(ps, loading, super::recovery::LoadRefusal::SourceFailed, None, "");
+            if let OpenRecoveryRun::DecodeInApp { offset_ns } = run {
+                decode_in_app(ps, pa, offset_ns);
+            }
         }
         return;
     }
@@ -1336,6 +1377,19 @@ fn pump_frame(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::P
             // back only once the tail has run: a rejection left the same Engine playing, and an
             // accepted claim's reload has kept the pause, so the Play lands on the NEW stream.
             let hold = super::claim_hold::take(action.serial());
+            // The hold paused a PLAYING stream iff `hold`. When it did, record the viewer's real
+            // transport goal (play) now, before the tail starts the fresh stream, so the
+            // landing's Feed start reflects what the viewer wants rather than the pause the hold
+            // itself imposed for the flight. Without this the landing reads the hold's own pause
+            // as the viewer's goal and starts the fresh stream paused: no Play op, no
+            // `startup_play_commanded`, and the Initial prime's gate never opens — the 4K->480p
+            // retranscode stall. A hold-less flight (a direct Original) left the transport
+            // untouched, so it records no goal and the landing falls back to the stream's own
+            // transport state — a goal written for the no-hold case would start that recovery
+            // paused and interrupt an automatic upgrade.
+            if hold {
+                ps.set_reconfigure_pause_goal(false);
+            }
             let replaced = if matches!(
                 action.intent,
                 crate::route::RouteIntent::Automatic(crate::route::AutomaticRouteIntent::HlsToOriginal { .. })
@@ -1353,6 +1407,10 @@ fn pump_frame(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::P
             // encoder it replaced safe to stop.
             crate::route::retire_superseded_encoder();
             super::claim_hold::release(ps, pa, hold);
+            // A tail that started a fresh Feed already consumed and cleared the goal; one that
+            // didn't (a rejection, or a landing onto the original) must not leak it into a later
+            // start, where it would override that start's own transport state.
+            ps.clear_reconfigure_pause_goal();
             if replaced {
                 return;
             }
@@ -2237,6 +2295,11 @@ mod flight_tests {
             // an Engine existed. It runs before the physical pump on each app frame.
             drain_engineless_rollback(&mut self.ps, &mut self.pa);
             pump(&mut self.ps, &mut self.pa, self.now);
+            // Then the persistent common owner's poll (`app::run`'s order), which advances exact
+            // startup controls, including the reloaded stream's first Play. Without it a landing's
+            // Play never reaches the sink and the feed gate stays shut.
+            let at = self.pa.backend_tick();
+            let _ = self.pa.backend_poll_session_at(&mut self.ps, at);
         }
 
         /// Frames until `done`, bounded: the worker lands on its own thread.
@@ -2336,6 +2399,130 @@ mod flight_tests {
         assert_eq!(FEED_TX.seek_to_ns.load(Relaxed), -1, "the seek was consumed, not re-armed");
         assert_eq!(rig.ps.readout().pending_seek(), None, "and the player's own target went with the feed's");
         rig.flight.wait_for("the replaced encoder's stop", |f| f.stopped().iter().any(|s| s == "rig-1"));
+    }
+
+    /// Field report (nightly 0.10.0-nightly-20261108, webOS 4, Boost Dialog remux, Segment seek
+    /// mode): a scrub on a PLAYING transcode flies with the claim hold engaged, the landing reloads
+    /// at the target (`reload_transcode: fresh Load`), the hold gives play back while the new Load
+    /// is still in flight (`player: user Resume accepted; physical Play remains fenced`), and the
+    /// fresh stream reaches `SMP loadCompleted`, fills both lanes to BufferFull, and never gets
+    /// `SMP Play`: the clock stays frozen at the target until the viewer backs out.
+    ///
+    /// Scrubs `rig`'s PLAYING transcode to its landing, then until the RELOADED Engine reports
+    /// loadCompleted. Answers the common runner's startup goal right after the landing (for the
+    /// failure message) and the sink's Play count at that point.
+    fn scrub_until_reloaded(rig: &mut Rig) -> (Option<bool>, u64) {
+        FEED_SHARED.frames.store(1, Relaxed);
+        assert!(!FEED_TX.paused.load(Acquire), "sanity: the transcode is playing");
+        let old_epoch = engine_epoch(rig);
+
+        crate::player::request_seek(&mut rig.ps, &mut rig.pa, SEEK_TARGET_NS);
+        rig.frame();
+        assert!(crate::route::flight_outstanding(), "the scrub must fly as a transcode seek");
+        assert!(super::super::claim_hold::owns_pause(), "a playing stream: the claim hold took the Pause");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while crate::route::flight_outstanding() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for the seek's landing");
+            std::thread::sleep(Duration::from_millis(2));
+            rig.frame();
+        }
+        // The hold owed the viewer a Play back; the field's give-back read `player: user Resume
+        // accepted; physical Play remains fenced`. The physical gate may stay shut until the
+        // startup Play; the common runner's startup goal is what decides whether that Play comes.
+        let goal_after_landing = rig.pa.backend_viewer_paused();
+        let plays = plx_play_feed::ffi_host::play_calls_for_test();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let loaded = rig.pa.engine().is_some_and(|eng|
+                Some(eng.native_epoch) != old_epoch && eng.stage >= Stage::Playing);
+            if loaded { break; }
+            assert!(std::time::Instant::now() < deadline,
+                "timed out waiting for the reloaded Engine's loadCompleted: {}", rig.recovery_diag());
+            std::thread::sleep(Duration::from_millis(2));
+            rig.frame();
+        }
+        (goal_after_landing, plays)
+    }
+
+    /// Both lanes of the reloaded Engine filled past the prime thresholds (`PRIME_NS` of video,
+    /// `PRIME_AUDIO_NS` of audio): what the field's "both AU lanes full" was, pushed into the
+    /// queues the pump's feed lanes drain.
+    fn fill_both_lanes(rig: &mut Rig) {
+        const V_STEP_NS: i64 = 41_708_333; // 23.976 fps
+        const A_STEP_NS: i64 = 32_000_000; // 1536 samples at 48 kHz
+        let mut eng = rig.pa.engine().expect("the reloaded Engine");
+        let base = eng.seek_base_pts;
+        let au = [0u8; 64];
+        let video = &mut **eng.aq_video.as_mut().expect("the video lane") as *mut plx_play_feed::aq::AuQueue;
+        for i in 0..48i64 {
+            plx_play_feed::aq::aq_push(video, au.as_ptr(), au.len() as std::ffi::c_int,
+                base + i * V_STEP_NS, std::ffi::c_int::from(i == 0), 1);
+        }
+        let audio = &mut **eng.aq_audio.as_mut().expect("the audio lane") as *mut plx_play_feed::aq::AuQueue;
+        for i in 0..64i64 {
+            plx_play_feed::aq::aq_push(audio, au.as_ptr(), au.len() as std::ffi::c_int,
+                base + i * A_STEP_NS, 1, 2);
+        }
+    }
+
+    /// The post-scrub landing's whole contract, graded on the physical sink: the common startup
+    /// runner commands the reloaded stream's first Play (`primed` is whether that Play waits for
+    /// the prime proof or goes at once), it reaches the sink, the feed gate is open and the
+    /// clock runs and advances.
+    fn assert_scrub_reload_plays(rig: &mut Rig, primed: bool) {
+        let (goal_after_landing, plays) = scrub_until_reloaded(rig);
+        {
+            let eng = rig.pa.engine().expect("the reloaded Engine");
+            assert_eq!(eng.startup_immediate_play, !primed,
+                "PRECONDITION: the reloaded start is {} (startup_immediate_play={}, prime_play={}, rebase_pending={})",
+                if primed { "primed before Play" } else { "an immediate-Play start" },
+                eng.startup_immediate_play, eng.prime_play, eng.rebase_pending);
+        }
+        fill_both_lanes(rig);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while plx_play_feed::ffi_host::play_calls_for_test() <= plays {
+            let (commanded, prime, immediate, user_held) = {
+                let eng = rig.pa.engine().expect("the reloaded Engine");
+                (eng.startup_play_commanded, eng.prime_play, eng.startup_immediate_play,
+                    eng.startup_user_held)
+            };
+            assert!(std::time::Instant::now() < deadline,
+                "the reloaded stream's first Play never reached the sink (startup_play_commanded={commanded}, \
+                 prime_play={prime}, immediate={immediate}, startup_user_held={user_held}, runner's startup \
+                 goal after the landing paused={goal_after_landing:?}, now {:?}): no `SMP Play` can ever \
+                 follow, and try_prime returns early forever",
+                rig.pa.backend_viewer_paused());
+            std::thread::sleep(Duration::from_millis(2));
+            rig.frame();
+        }
+        assert!(!FEED_TX.paused.load(Acquire), "the feed gate is open once the stream plays");
+        let (before, running) = plx_play_feed::ffi_host::clock_state_for_test();
+        assert!(running, "the sink clock runs after the first Play");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            rig.frame();
+            if plx_play_feed::ffi_host::clock_state_for_test().0 > before { break; }
+            assert!(std::time::Instant::now() < deadline,
+                "the sink clock never advanced past {before}ns after the first Play");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// The progressive (non-rebased) transcode: the first Play is an immediate one.
+    #[test]
+    fn a_playing_transcode_seek_landing_issues_play_on_the_reloaded_stream() {
+        let mut rig = Rig::new(60);
+        assert_scrub_reload_plays(&mut rig, false);
+    }
+
+    /// The same scrub when the reloaded start must prime before Play (`prime_before_play`: a
+    /// rebased or segmented-HLS start), where the runner's Play goes through
+    /// `FeedTransportAction::ResumeInitial` and the prime proof releases the sink's Play.
+    #[test]
+    fn a_playing_primed_transcode_seek_landing_issues_play_on_the_reloaded_stream() {
+        let mut rig = hls_rig(60);
+        assert_scrub_reload_plays(&mut rig, true);
     }
 
     /// The track-memory write-back is sent from the pump's decoded-frame branch and from nowhere
@@ -2641,6 +2828,10 @@ mod flight_tests {
         assert_eq!(crate::route::transcode_session(&rig.ps), "rig-1", "the retained HLS is still the route");
         assert!(!crate::route::original_recovery_pending());
         assert_ne!(engine_epoch(&mut rig), epoch, "the producer had stopped, so the HLS Engine was reopened");
+        // The reopened Engine's first Play belongs to the common startup runner: the feed gate
+        // opens once its Load completes and the runner's Play is accepted, not at the landing.
+        rig.frames_until("the reopened stream's first Play opens the feed gate",
+            |_| !FEED_TX.paused.load(Acquire));
         assert!(!super::super::claim_hold::active() && !FEED_TX.paused.load(Acquire));
         assert!(!rig.flight.stopped().iter().any(|s| s == "rig-1"));
     }
@@ -2899,6 +3090,35 @@ mod flight_tests {
         assert_ne!(crate::player::state(&rig.ps), crate::player::PlaybackState::Error, "leaving clears the standing error");
         assert!(crate::route::url(&rig.ps).is_empty(), "and the playback");
         crate::player::stop_bufferfeed(&mut rig.ps, &mut rig.pa);
+    }
+
+    #[test]
+    fn stopping_while_a_seek_reload_waits_for_unload_reports_the_target() {
+        let mut rig = Rig::direct(0);
+        rig.frame();
+        suspend_bufferfeed(&mut rig.ps, &mut rig.pa);
+        // Deliver the release owner's handoff for a previous object that still owns the slot.
+        // Start, cancellation, and the Plex request below use the product paths.
+        rig.pa.release_step(&mut rig.ps, &super::super::release::ReleaseEvent::UnloadHandedOff {
+            epoch: 1, at: std::time::Instant::now(),
+        }, &mut Vec::new());
+        crate::player::request_seek(&mut rig.ps, &mut rig.pa, SEEK_TARGET_NS);
+        assert_eq!(
+            super::super::engine::reload_at(&mut rig.ps, &mut rig.pa, SEEK_TARGET_NS),
+            super::super::engine::ReloadOutcome::Started,
+        );
+        assert!(rig.ps.readout().start_queued(), "the seek's replacement waits for Unload");
+        assert!(!rig.pa.is_live(), "there is no engine to take a stop sample from");
+
+        crate::player::stop_bufferfeed(&mut rig.ps, &mut rig.pa);
+        crate::route::drain_scrobble();
+        assert!(!rig.ps.readout().start_queued(), "Back cancels the replacement");
+        let stopped: Vec<_> = rig.flight.requests().into_iter()
+            .filter(|line| line.contains("/:/timeline?") && line.contains("state=stopped"))
+            .collect();
+        let target = format!("time={}&", SEEK_TARGET_NS / 1_000_000);
+        assert_eq!(stopped.len(), 1, "one final Plex report: {stopped:?}");
+        assert!(stopped[0].contains(&target), "the pending seek is the stop position: {stopped:?}");
     }
 
     /// Taps that arrive during a seek's flight coalesce to the LAST one: the first landing is
@@ -3594,10 +3814,10 @@ mod flight_tests {
         // The pipeline takes one AU per lane, then presents nothing. Keep later AUs beyond the
         // feed-ahead limit and one more queued behind each pending AU, as a demuxer sees when a
         // decoder swallows the feed. The first frame completes Load and accepts the first pair;
-        // the second establishes the watchdog's unchanged accepted-count baseline. The audio
-        // lane DROPS an AU more than `AUDIO_STALE_AHEAD_NS` (5 s) past the fed video instead of
-        // holding it, so its later AUs sit under that bound yet past its own feed-ahead budget
-        // (`MAX_FEED_AHEAD_NS` + `AUDIO_SLACK_NS`, 3.6 s).
+        // the second establishes the watchdog's unchanged accepted-count baseline. Until its
+        // first AU is accepted the audio lane DROPS an AU more than `AUDIO_STALE_AHEAD_NS` (5 s)
+        // past the fed video instead of holding it, so its later AUs sit under that bound yet
+        // past its own feed-ahead budget (`MAX_FEED_AHEAD_NS` + `AUDIO_SLACK_NS`, 3.6 s).
         {
             let mut guard = rig.pa.engine().expect("the rig's Engine");
             let eng = &mut *guard;
@@ -4890,6 +5110,59 @@ mod native_seek_pump_tests {
     }
 
     #[test]
+    fn a_primed_segment_seek_with_only_stale_clock_samples_reloads_once() {
+        let _serial = plx_base::testlock::serial();
+        let mut rig = Rig::new(None);
+        plx_play_feed::seek::set_seek_mode(SeekMode::Segment);
+        FEED_SHARED.playpos_ns.store(2_220_000_000_000, Relaxed);
+        let target = 2_118_000_000_000;
+        let keyframe = 2_112_110_000_000;
+        rig.arm(target);
+        rig.land_keyframe_aus(keyframe, 80);
+        let epoch = rig.eng().native_epoch;
+        for _ in 0..20 {
+            rig.frame();
+            if !rig.eng().prime_play {
+                break;
+            }
+        }
+        assert!(!rig.eng().prime_play, "the in-place seek reached Play");
+        assert!(ffi_host::segment_calls_for_test() > 0, "the new segment was sent");
+        // A displayed-count callback and the clock on the retired timeline raced the seek.
+        plx_play_feed::sf_event::sf_on_event(epoch, 47, 9, std::ptr::null());
+        plx_play_feed::sf_event::sf_on_event(epoch, 0, 9_000_000_000, std::ptr::null());
+        rig.frame();
+        assert_eq!(rig.ps.readout().raw().playpos_ns, 9_000_000_000, "the stale position reached the pump");
+        assert!(rig.ps.readout().seeking(), "the segment is still awaiting presentation");
+        assert!(super::super::timeline::TimelineSnapshot::from_feed(
+            rig.ps.readout(), 7_200_000_000_000,
+        ).is_none(), "Plex must not save the stale clock");
+        assert!(reloads().is_empty(), "presentation gets time to land");
+        rig.now += 10_000;
+        for _ in 0..5 {
+            rig.frame();
+        }
+        assert_eq!(reloads(), vec![target], "reopen succeeded, but the seek needs one fresh Load");
+    }
+
+    #[test]
+    fn an_old_segment_deadline_does_not_reload_a_newer_seek() {
+        let _serial = plx_base::testlock::serial();
+        let mut rig = Rig::new(None);
+        plx_play_feed::seek::set_seek_mode(SeekMode::Segment);
+        rig.arm(TARGET_NS);
+        rig.land_keyframe_aus(TARGET_NS, 80);
+        for _ in 0..20 {
+            rig.frame();
+        }
+        assert!(!rig.eng().prime_play, "the first seek reached Play");
+        rig.now += 10_000;
+        rig.arm(NEXT_NS);
+        assert_eq!(FEED_SHARED.seek_to_ns.load(Relaxed), NEXT_NS);
+        assert!(reloads().is_empty(), "the newer seek got its own demux and presentation budgets");
+    }
+
+    #[test]
     fn a_native_seek_lands_on_the_keyframe_without_a_flush_or_a_reload() {
         let _serial = plx_base::testlock::serial();
         let mut rig = Rig::new(None);
@@ -5030,18 +5303,26 @@ mod native_seek_pump_tests {
         assert!(FEED_TX.seek_preroll_active(), "the pump opened the paused-seek preroll itself");
         assert!(rig.ps.readout().feed_allowed() && FEED_TX.feed_allowed(),
             "the gate the pump's watchdog reads is open for the preroll's keyframe, in both copies");
-        rig.land_keyframe(TARGET_NS);
-        for _ in 0..5 {
+        rig.land_keyframe_aus(TARGET_NS, 80);
+        for _ in 0..20 {
             rig.frame();
         }
         assert!(!rig.eng().flushed && !rig.eng().rebase_pending, "the keyframe reached feed_stream's rebase");
+        assert!(!rig.eng().prime_play, "the preroll clock started");
         match mode {
             SeekMode::NativeSeek => {
                 assert_eq!(ffi_host::seek_log_for_test(), vec![TARGET_NS / 1_000_000], "one Seek, at the keyframe");
             }
             _ => assert!(ffi_host::segment_calls_for_test() > 0, "the segment was anchored on the keyframe"),
         }
-        rig.now += 5_000; // well past SEEK_STUCK_MS
+        // The sink and callback clock must both follow a Segment seek before the paused
+        // preroll closes. NativeSeek continues to use its own landing semantics.
+        if mode == SeekMode::Segment {
+            let epoch = rig.eng().native_epoch;
+            plx_play_feed::sf_event::sf_on_event(epoch, 47, 1, std::ptr::null());
+            plx_play_feed::sf_event::sf_on_event(epoch, 0, TARGET_NS, std::ptr::null());
+        }
+        rig.now += 5_000; // well past the reopen budget
         for _ in 0..3 {
             rig.frame();
         }
@@ -5538,6 +5819,42 @@ mod native_seek_pump_tests {
         let plays = rig.land_and_present(60_000_000_000);
         assert!(plays >= 1, "the prime Play fired through the opened gate");
         assert_ended_paused();
+    }
+
+    #[test]
+    fn a_common_startup_paused_reload_primes_without_a_viewer_play_command() {
+        let _serial = plx_base::testlock::serial();
+        let mut rig = Rig::new(None);
+        rig.eng().startup_controlled = true;
+        rig.eng().startup_play_commanded = false;
+        rig.eng().startup_user_held = true;
+        FEED_SHARED.reset_hls_clock_for_test();
+        assert!(FEED_SHARED.arm_initial_clock_hold(false, false));
+        assert!(crate::player::pause(&mut rig.ps, &mut rig.pa));
+        rig.frame();
+        assert!(FEED_TX.seek_preroll_active(), "the paused reload owns a bounded first-picture preroll");
+        let plays = rig.land_and_present(60_000_000_000);
+        assert!(plays >= 1, "the internal preroll must present a frame without a viewer Play");
+        assert!(!rig.eng().startup_play_commanded, "preroll must not invent a viewer Play command");
+        assert_ended_paused();
+    }
+
+    #[test]
+    fn a_common_startup_without_a_paused_preroll_still_waits_for_the_play_command() {
+        let _serial = plx_base::testlock::serial();
+        let mut rig = Rig::new(None);
+        rig.eng().startup_controlled = true;
+        rig.eng().startup_play_commanded = false;
+        FEED_SHARED.reset_hls_clock_for_test();
+        assert!(FEED_SHARED.arm_initial_clock_hold(false, false));
+        let plays = ffi_host::play_calls_for_test();
+        rig.land_keyframe_aus(60_000_000_000, 90);
+        for _ in 0..8 {
+            rig.frame();
+        }
+        assert!(!FEED_TX.seek_preroll_active());
+        assert_eq!(ffi_host::play_calls_for_test(), plays, "ordinary startup still waits for Play");
+        assert!(rig.eng().prime_play);
     }
 
     #[test]

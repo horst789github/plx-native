@@ -124,7 +124,7 @@ fn marker(kind: plx_data::metadata::MarkerKind, final_seg: bool) -> plx_data::me
 fn slot_of(occupant: Occupant) -> ControlSlot {
     use plx_data::metadata::MarkerKind::{Credits, Intro};
     use plx_media::route::NextEpisodeMode::Countdown;
-    let discs = |previous, next| ControlSlot::Discs(Controls { previous, next, restart: false });
+    let discs = |previous, next| ControlSlot::Discs(Controls { previous, next });
     let slot = match occupant {
         Occupant::Plain => ControlSlot::Discs(Controls::NONE),
         Occupant::Episode => discs(true, true),
@@ -288,6 +288,7 @@ impl Run {
         let mut d: Dispatcher<TestHost> = Dispatcher::new();
         let mut rig = PinRig { mounter: PinMounter { package }, measure: FixtureMeasure,
             session: super::playback_session(0, 0), reqs: Vec::new(), perform };
+        super::publish_presentation_fixture(Default::default());
         d.request(MachineId::Nav, NavOp::Root(FixtureArg::VideoPlane));
         d.frame_with(&mut rig, tick(0), vec![], vec![], &mut NoTap, false);
         let id = d.nav.top_page().expect("the player page mounted").id;
@@ -309,17 +310,10 @@ impl Run {
             .expect("the mounted page is the player")
     }
 
-    fn note_fresh_press(&mut self, now: u32) {
-        let ps = &self.rig.session;
-        let screen = self.d.nav.entry_mut(self.id)
-            .and_then(|entry| entry.inst.as_mut())
-            .and_then(|inst| inst.screen.as_any_mut())
-            .and_then(|any| any.downcast_mut::<PlayerScreen>())
-            .expect("the mounted page is the player");
-        screen.hud.note_fresh_press(ps, now, false);
-    }
-
     fn frame(&mut self, ms: u32, inputs: Vec<InputEvent<u32>>) {
+        let mut presentation = self.screen().presentation.clone();
+        presentation.busy = self.screen().busy;
+        super::publish_presentation_fixture(presentation);
         self.d.frame_with(&mut self.rig, tick(ms), inputs, vec![], &mut NoTap, false);
     }
 
@@ -355,8 +349,6 @@ impl Run {
             e
         };
         let now = self.now;
-        // the app's per-key preamble, before the key-down frame
-        self.note_fresh_press(now);
         self.frame(now, vec![coded(key(k, tick(now)))]);
         self.frame(now + 16, vec![]);
         self.frame(now + 112, vec![coded(key_up(k, tick(now + 112)))]);
@@ -367,7 +359,6 @@ impl Run {
     /// roughly 50 ms), then the release.
     fn press_held(&mut self, k: Key, repeat_at: &[u32]) {
         let now = self.now;
-        self.note_fresh_press(now);
         let with = |edge: plx_machine::machine::Edge, at: u32| {
             let mut e = key(k, tick(at));
             if let plx_machine::machine::InputKind::Key { edge: ed, .. } = &mut e.kind {
@@ -576,6 +567,8 @@ struct Census {
 fn census_screen(occupant: Occupant, failed: bool) -> PlayerScreen {
     let mut screen = PlayerScreen::new(ENTRY, plx_appkit::player_hud::loaded::classic_for_test());
     screen.slot = slot_of(occupant);
+    // The census probes inactive failure geometry too; supply its complete explicit model.
+    screen.presentation.failure = Some(std::sync::Arc::new(super::failure_fixture(plx_media::route::idle_session_for_test())));
     if failed {
         screen.busy = Busy::Readout(
             plx_ui::widgets::StatusKind::Failed,
@@ -2585,20 +2578,7 @@ mod sections {
             Shown { group, held, btn, tab, open: self.open_sections() }
         }
 
-        /// **What the app does with `ArmControlRow`** (a click on the control row): the press dips, and the loop's commit
-        /// frame performs the command of the row item the cursor holds (`app::playback::activate_player_row`). Here the
-        /// part that reaches the page: a `toggle_section` is answered with the addressed event, as `perform` does for the
-        /// command OK asks.
-        fn perform_armed_row(&mut self) {
-            if !self.rig.perform || !self.rig.reqs.contains(&PlayerReq::ArmControlRow) {
-                return;
-            }
-            let btn = self.screen().hud.nav.btn;
-            if let Some(HudCommand::ToggleSection(section)) = self.screen().row_command(btn) {
-                let page = MachineId::Instance(self.d.top_page().expect("the player page is mounted"));
-                self.d.emit(page, Fx::Deliver(page, Delivery::Screen(ScreenEvent::App(AppMsg::HudSection(section)))));
-            }
-        }
+
     }
 
     /// The reference with `section` opened from its disc, `how`, and the disc's row index. A click needs a drawn
@@ -2807,8 +2787,6 @@ mod sections {
         // lands on moves neither the section nor the limit, the next frame moves both
         let now = run.now + 16;
         run.now = now;
-        let ps = plx_media::route::idle_session_for_test();
-        run.screen().hud.note_fresh_press(ps, now, false);
         run.frame(now, vec![key(Key::Back, tick(now))]);
         assert!(run.open_sections().is_empty(), "BACK closed it");
         assert_eq!((run.appear(Section::Info), limit(&mut run)), (1.0, 656.0), "the dismissal frame moves nothing");
@@ -2868,8 +2846,6 @@ mod sections {
             assert_eq!(run.appear(section), 1.0);
             let now = run.now + 16;
             run.now = now;
-            let ps = plx_media::route::idle_session_for_test();
-            run.screen().hud.note_fresh_press(ps, now, false);
             run.frame(now, vec![key(Key::Back, tick(now))]);
             assert!(run.open_sections().is_empty(), "{section:?}: BACK closed it");
             assert_eq!(run.appear(section), 1.0, "{section:?}: the frame BACK landed on draws it whole");
@@ -2889,19 +2865,22 @@ mod sections {
         assert_idle_playhead();
         let _chapters = Chaptered::install();
         let mut run = classic_run(Occupant::Plain);
-        run.open_from_tab(1);
-        let seat = (run.held().unwrap() - ELEM_CHAPTER_BASE) as usize;
+        run.walk("DDR");
+        run.tap(Key::Ok);
+        let mut seat = None;
         let mut first = None;
         for _ in 0..40 {
             if first.is_none() && run.appear(Section::Chapters) > 0.0 {
-                first = Some(run.screen().row.strip_shelf().unwrap().pop_of(seat));
+                let index = (run.held().unwrap() - ELEM_CHAPTER_BASE) as usize;
+                seat = Some(index);
+                first = Some(run.screen().row.strip_shelf().unwrap().pop_of(index));
             }
             run.frames(1);
         }
         let first = first.expect("the section appears");
         assert!(first < 1.02, "the seat is at pop {first} when the section first moves, not grown from rest");
         run.frames(120);
-        let settled = run.screen().row.strip_shelf().unwrap().pop_of(seat);
+        let settled = run.screen().row.strip_shelf().unwrap().pop_of(seat.expect("the opening section seats a chapter"));
         assert!((settled - plx_ui::widgets::CARD_FOCUS_SCALE).abs() < 0.001, "…and reaches the focus scale: {settled}");
     }
 
@@ -2917,13 +2896,13 @@ mod sections {
         run.open_from_tab(0);
         run.step('D');
         run.frames(30);
-        assert!(run.screen().row.section_scale(1) > 1.0, "the second button is popped while it holds the focus");
+        assert!(run.screen().row.section_scale(1, Default::default()) > 1.0, "the second button is popped while it holds the focus");
         run.step('D');
         run.frames(300);
         assert!(run.presented().is_empty());
         run.toggle(Section::Info);
         // the first button has begun to grow toward the focus the card opens on; the second has none
-        let scale = run.screen().row.section_scale(1);
+        let scale = run.screen().row.section_scale(1, Default::default());
         assert_eq!(scale.to_bits(), 1.0f32.to_bits(), "the second button opens at rest, not at {scale}");
     }
 
@@ -3185,7 +3164,7 @@ mod sections {
             let now = self.now;
             self.frame(now, vec![pointer_event(plx_machine::machine::InputKind::Click { x, y, hit: None }, now)]);
             self.frame(now + 60, vec![key_up(Key::Ok, tick(now + 60))]);
-            self.perform_armed_row();
+
             self.settle(now + 60);
             self.now += 600;
         }

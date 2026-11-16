@@ -57,7 +57,9 @@
 //! a refusal the store's next step settles. The owned Library emits `PublishShelves`;
 //! the application combines its visibility flags with live press state (a press holds only
 //! committed shelves; a page's first publication is never held by one) and delivers addressed
-//! `LibraryWork::Hubs` to `stores::browse`, which calls `kick` and gates staged publication.
+//! `LibraryWork::Hubs` to `stores::browse`, which calls `kick` and gates staged publication. The
+//! Settings Under posters pages also send `LibraryWork::Hubs { may_publish: true }` (for a library of
+//! a kind they have no poster of), with a `StoreWork::Browse` pump, until the section is published.
 //! It was dormant for one landing — deliberately, since a fetch is
 //! production network, task and retry behaviour and "fetched but not drawn" would not have been
 //! dormancy at all — and the screen that draws the shelves is what woke it.
@@ -313,6 +315,18 @@ pub(super) struct HubAdapter {
 }
 
 impl SecHubs {
+    /// Has this section's shelves read been answered and committed at least once (even with no
+    /// shelves)? What a page that is only waiting for the answer asks ([`super::DirectoryView::kind_shelves_published`]).
+    pub(super) fn is_published(&self) -> bool {
+        self.published
+    }
+
+    /// A landed list read, held staged (what `hubs_land` does), for a test of the views over it.
+    #[cfg(test)]
+    pub(super) fn stage_for_test(&mut self, shelves: Vec<Shelf>) {
+        self.land_ok(shelves);
+    }
+
     pub(super) fn needs_tick(&self) -> bool {
         self.armed && (self.retry_left > 0 || self.notified_wait > 0 || self.notified_owed || (!self.published && self.first_paint_left > 0)
             || (self.owed && self.retry_left == 0) || self.ask_retry_left > 0 || self.row_wanted())
@@ -673,7 +687,7 @@ impl super::BrowseState {
                 Flight::Row => st.hubs.inflight = None,
             }
         }
-        plx_machine::idle::invalidate();
+
     }
 
     /// Reads one row's window: a page the reader walked to, or the cards of a row that came back
@@ -742,7 +756,7 @@ impl super::BrowseState {
                     plx_base::eventlog::log(&format!("libhubs: section {} row {} read failed", result.sec, ask.id));
                 }
                 let moved = state.hubs.land_row(&ask, shelf);
-                plx_machine::idle::invalidate();
+
                 return moved || failed;
             }
             Outcome::List(Some(parsed)) => {
@@ -768,7 +782,7 @@ impl super::BrowseState {
                 state.hubs.owed = true;
             }
         }
-        plx_machine::idle::invalidate();
+
         true
     }
 

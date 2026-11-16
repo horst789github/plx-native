@@ -4,7 +4,12 @@
 //!
 //!   - [`acb_init`] boots the video plane owner (`plx_platform::tv::plane`) once per process, for
 //!     EVERY backend set. It used to live in the Feed engine, so a URI-only build never created the
-//!     ACB handle, and a webOS 4.x television then stalled URI HLS for want of a bound plane.
+//!     ACB handle, and a webOS 4.x television then stalled URI HLS for want of a bound plane. On an
+//!     ACB display it creates Feed's handle (player type 10) and no other: the URI engine's handle
+//!     (player type 0, which its product binding is gated on) is created when the first source is offered
+//!     to it (`PlaneOwner::ensure_handle`, run by `UriDriver::ready_to_start`), so a viewer who
+//!     never plays through it never has a second ACB core (#1394), while a normal boot still
+//!     composes the URI driver `Acb` with no `ptype` trigger.
 //!   - [`compose_backends`] installs the product URI driver and then tells the route session which
 //!     backends the installed drivers form, so policy offers what is physically there instead of
 //!     what Cargo features happened to be on.
@@ -17,8 +22,15 @@ use plx_media::player::adapter::PlayerAdapter;
 #[cfg(feature = "play-feed")]
 use plx_media::player::adapter::StartHooks;
 use plx_media::route::PlaybackSession;
-use plx_platform::tv::plane::{self, PlaneFacts, PlaneOwner, DEFAULT_PLAYER_TYPE};
+use plx_platform::tv::plane::{self, PlaneFacts, PlaneOwner};
+#[cfg(feature = "play-feed")]
+use plx_platform::tv::plane::DEFAULT_PLAYER_TYPE;
+#[cfg(feature = "play-feed")]
+use plx_platform::tv::plane::PlaneHandle;
+#[cfg(feature = "play-uri")]
+use plx_platform::tv::plane::URI_PLAYER_TYPE;
 use plx_platform::tv::sink::{self, DisplaySink, VP_EXPORTED, VP_NONE};
+#[cfg(feature = "play-feed")]
 use std::os::raw::c_int;
 #[cfg(feature = "play-feed")]
 use plx_play_feed::{control::FeedBackend, feed_resources::{FeedResources, LoadReceipt},
@@ -56,26 +68,27 @@ pub(crate) fn acb_init(mt: &MainThread) {
 /// [`acb_init`] over the display sink and plane owner the caller names: the boot passes the
 /// installed pair, a test passes a scripted sink and its own owner.
 fn acb_init_with(mt: &MainThread, display: &dyn DisplaySink, owner: &PlaneOwner) {
-    let facts = match display.window_mode() {
+    match display.window_mode() {
         VP_EXPORTED => {
             log("vplane: exported window (webOS 5+) — created per session");
             // Nothing to bind later; the ACB stages are skipped by the plane having no handle.
-            PlaneFacts::ABSENT
+            owner.boot(PlaneFacts::ABSENT);
         }
         VP_NONE => {
             log(
                 "vplane: this device has NEITHER libAcbAPI nor SDL's exported window — audio \
                  will play and the picture will not appear. Please report your webOS version.",
             );
-            PlaneFacts::ABSENT
+            owner.boot(PlaneFacts::ABSENT);
         }
-        _ => acb_init_acb(mt, display),
-    };
-    owner.boot(facts);
+        _ => acb_init_acb(mt, display, owner),
+    }
 }
 
-/// The webOS 4.x half of [`acb_init_with`].
-fn acb_init_acb(mt: &MainThread, display: &dyn DisplaySink) -> PlaneFacts {
+/// The player type Feed's handle is initialized with: [`DEFAULT_PLAYER_TYPE`], or what the
+/// `/tmp/plxnative-ptype` developer trigger says (the URI probe's controlled arms set it).
+#[cfg(feature = "play-feed")]
+fn feed_player_type() -> c_int {
     let mut pt = DEFAULT_PLAYER_TYPE;
     if let Some(s) = plx_base::devtrig::read("ptype") {
         if let Ok(p) = s.parse::<c_int>() {
@@ -83,6 +96,18 @@ fn acb_init_acb(mt: &MainThread, display: &dyn DisplaySink) -> PlaneFacts {
         }
     }
     log(&format!("ptype={pt}"));
+    pt
+}
+
+/// The webOS 4.x half of [`acb_init_with`]: Feed's handle, created and initialized ONCE and never
+/// destroyed (a destroy races `LSClient::stop`), player type 10 (what a normal boot has always
+/// initialized), with exactly the calls and log lines it always had. The URI engine's handle (player
+/// type 0, the one its product binding is gated on) is NOT a boot's: the offer of its first source
+/// creates it, once, on the main thread (`PlaneOwner::ensure_handle`, reached from the URI
+/// driver's `ready_to_start`), so a viewer on Standard never has a second core; two cores in one process are
+/// independent (`tv::plane`'s module doc). A build with no Feed boots Feed's facts absent.
+#[cfg_attr(not(feature = "play-feed"), allow(unused_variables))]
+fn acb_init_acb(mt: &MainThread, display: &dyn DisplaySink, owner: &PlaneOwner) {
     // Which app ACB is being initialized for. The third argument of `AcbAPI_initialize` is an app
     // id — that much is certain, and both reference implementations pass one (Kodi's webOS port
     // passes `getenv("APPID")`; see docs/distribution.md). What ACB does with it has not been
@@ -97,10 +122,16 @@ fn acb_init_acb(mt: &MainThread, display: &dyn DisplaySink) -> PlaneFacts {
     // registered by definition. The environment is still logged, one line at boot, as the
     // independent witness for whether SAM sets it at all on this firmware.
     let app_c = std::ffi::CString::new(plx_base::paths::app_id()).ok();
-    let app_ptr = app_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
-    let acb = unsafe { display.plane_create(mt, app_ptr, pt) };
-    log(&format!("acb create={acb}"));
-    PlaneFacts { handle: acb != 0, player_type: pt }
+    #[cfg(feature = "play-feed")]
+    {
+        let pt = feed_player_type();
+        // The owner creates it through the sink, records the facts, the id the sink knows it by and
+        // the library's confirmation of the initialize (read while it is the sink's current handle),
+        // and logs `acb create=..` and `acb handle=feed ptype=.. create=.. initialized=..`.
+        owner.ensure_handle(display, mt, PlaneHandle::Feed, app_c.as_deref(), pt);
+    }
+    #[cfg(not(feature = "play-feed"))]
+    owner.boot(PlaneFacts::ABSENT);
 }
 
 /// Compose the backends this boot supplies. A normal boot installs the product URI driver first
@@ -312,19 +343,47 @@ impl MonotonicClock for ProductUriClock {
     fn now_ms(&self) -> u64 { self.0.now_ms() }
 }
 
+/// The display path the product URI driver is composed with, and the boot log line that names it
+/// and the gate's inputs (so the television shows it without a trigger). On an ACB display the URI
+/// engine's own handle (player type 0) does not exist yet: the offer of its first source creates it, so the
+/// line says `handle=deferred` and the binding is `Acb`, and each Start's gate decides that play.
+/// `firmware_major` (`device::info().major`, read by the caller at the
+/// IO side, 0 when unknown) and `strata` (production's `EXPORTED_STRATA`) are parameters, never a
+/// global read here, so a test passes its own. The line ends `major=<n> evidence=table|none`:
+/// `table` when `strata` admitted that major's exported window, `none` otherwise. `none` says only
+/// that the table admitted nothing, not that the play is Standard: an ACB set reads `none` and
+/// still plays URI through `Acb` for a viewer who opted in, while a webOS 5+ major with no entry
+/// reads `none` and plays Standard. The debug override logs its own `evidence=override` line after
+/// this one.
+#[cfg(feature = "play-uri")]
+fn uri_product_binding(display: &dyn DisplaySink, firmware_major: u32, strata: &[u32]) -> UriBinding {
+    let binding = plx_play_uri::backend::product_binding(display.window_mode(), firmware_major, strata);
+    let handle = if matches!(binding, UriBinding::Acb) { "deferred" } else { "none" };
+    // Only the table composes the exported window here, so an exported binding IS table evidence.
+    let evidence = if matches!(binding, UriBinding::Exported { .. }) { "table" } else { "none" };
+    log(&format!("uri: product binding={binding:?} mode={} handle={handle} ptype={URI_PLAYER_TYPE} \
+        major={firmware_major} evidence={evidence}", display.window_mode()));
+    binding
+}
+
 /// Capture the installed display and URI bus at the playback IO boundary. Current product
-/// evidence remains unqualified; returning a port never certifies a source by itself. (A debug
-/// build's URI dev route, armed by a trigger read once here, is the one thing that changes that:
-/// `dev::uri_product`.)
+/// evidence remains unqualified for everyone but a viewer who opted in to the URI engine in
+/// Settings; returning a port never certifies a source by itself. (A debug
+/// build's URI dev route, armed by a trigger read once here, is the other thing that changes that:
+/// `dev::uri_product`. A debug build's exported-window override, `dev::uri_exported`, is read here
+/// too but certifies nothing: it only composes the display path.)
 #[cfg(feature = "play-uri")]
 pub(crate) fn install_uri_product(adapter: &mut PlayerAdapter, session: &mut PlaybackSession) -> bool {
     let display = sink::display_installed();
-    // SAFETY: the adapter holds the main-thread witness, and boot ran `acb_init` before this.
-    let initialized = unsafe { display.plane_initialized(adapter.mt()) };
-    let evidence = ProductEvidence::unqualified_on(
-        display.window_mode(),
-        plx_play_uri::backend::product_binding(display.window_mode(), plane::installed().facts(),
-            initialized));
+    let binding = uri_product_binding(display, plx_platform::tv::device::info().major,
+        plx_play_uri::backend::EXPORTED_STRATA);
+    // The exported-window override (`dev::uri_exported`): a debug build armed with its trigger, on a
+    // display in `VP_EXPORTED` mode, composes the exported window; otherwise the binding is returned
+    // as built.
+    #[cfg(feature = "devtriggers")]
+    let binding = crate::dev::uri_exported::compose(binding, display.window_mode(),
+        crate::dev::uri_exported::armed());
+    let evidence = ProductEvidence::unqualified_on(display.window_mode(), binding);
     let qualifier: std::sync::Arc<dyn OriginalQualifier> = std::sync::Arc::new(ProductQualifier);
     // The URI dev route (`dev::uri_product`): a debug build armed with its trigger, on an ACB-bound
     // display, swaps in evidence and a qualifier for the one Part it names; otherwise this pair is
@@ -336,8 +395,9 @@ pub(crate) fn install_uri_product(adapter: &mut PlayerAdapter, session: &mut Pla
     install_uri_product_with_ports(adapter, session, port, plx_platform::tv::uri::installed(), display)
 }
 
-/// One boot composition for both real and injected ports. The exact evidence configures the
-/// driver and is handed to the resolver only after physical installation succeeds.
+/// One boot composition for both real and injected ports. The driver is configured with the binding
+/// and the capabilities an opted-in viewer certifies (`ProductEvidence::opted_in`), and the resolver
+/// receives the exact evidence, only after physical installation succeeds.
 #[cfg(feature = "play-uri")]
 pub(crate) fn install_uri_product_with_ports(adapter: &mut PlayerAdapter,
     session: &mut PlaybackSession, port: ResolvePort,
@@ -348,7 +408,9 @@ pub(crate) fn install_uri_product_with_ports(adapter: &mut PlayerAdapter,
         clock: Box::new(ProductUriClock(plx_media::player::adapter::MonotonicMs::start())),
         app_id: plx_base::paths::app_id().to_owned(),
         binding: evidence.binding,
-        capabilities: evidence.certified,
+        // What the driver can carry is what an opted-in viewer certifies; it is offered a source
+        // only by a qualification, which production supplies for that viewer alone.
+        capabilities: evidence.opted_in().certified,
         startup_timeout_ms: 15_000,
         release_allowance_ms: 10_000,
         source_ttl_ms: 30_000,
@@ -393,17 +455,22 @@ pub(crate) fn install_uri_backend_with_ports(adapter: &mut PlayerAdapter,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plx_platform::tv::plane::PlaneHandle;
     use plx_base::task::MainThread;
+    use plx_platform::tv::plane::DEFAULT_PLAYER_TYPE;
     use plx_platform::tv::sink::{NoSink, VP_ACB};
-    use std::os::raw::{c_char, c_long};
+    use std::os::raw::{c_char, c_int, c_long};
     use std::sync::Mutex;
 
-    /// A display sink whose window mode and ACB create answer are scripted, and which records
-    /// what `plane_create` was asked for. Every other verb is `NoSink`'s refusal.
-    struct BootSink { mode: c_int, create: c_long, asked: Mutex<Vec<(String, c_int)>> }
+    /// A display sink whose window mode and ACB create answers are scripted (one per create, the
+    /// last repeating), which confirms the initialize of what it created, and which records what
+    /// `plane_create` was asked for. Every other verb is `NoSink`'s refusal.
+    struct BootSink { mode: c_int, creates: Vec<c_long>, asked: Mutex<Vec<(String, c_int)>>,
+        select: Mutex<Vec<c_long>> }
     impl BootSink {
-        fn new(mode: c_int, create: c_long) -> Self {
-            Self { mode, create, asked: Mutex::new(Vec::new()) }
+        fn new(mode: c_int, create: c_long) -> Self { Self::answering(mode, vec![create]) }
+        fn answering(mode: c_int, creates: Vec<c_long>) -> Self {
+            Self { mode, creates, asked: Mutex::new(Vec::new()), select: Mutex::new(Vec::new()) }
         }
     }
     impl DisplaySink for BootSink {
@@ -416,10 +483,18 @@ mod tests {
         unsafe fn plane_create(&self, _: &MainThread, app_id: *const c_char, player_type: c_int)
             -> c_long {
             let id = std::ffi::CStr::from_ptr(app_id).to_string_lossy().into_owned();
-            self.asked.lock().unwrap().push((id, player_type));
-            self.create
+            let mut asked = self.asked.lock().unwrap();
+            asked.push((id, player_type));
+            self.creates[(asked.len() - 1).min(self.creates.len() - 1)]
         }
-        unsafe fn plane_initialized(&self, mt: &MainThread) -> bool { NoSink.plane_initialized(mt) }
+        unsafe fn plane_select(&self, _: &MainThread, handle: c_long) -> bool {
+            self.select.lock().unwrap().push(handle);
+            true
+        }
+        unsafe fn plane_initialized(&self, _: &MainThread) -> bool {
+            let asked = self.asked.lock().unwrap().len();
+            asked != 0 && self.creates[(asked - 1).min(self.creates.len() - 1)] != 0
+        }
         #[cfg(feature = "devtriggers")]
         unsafe fn plane_probe_dass_available(&self, mt: &MainThread) -> bool {
             NoSink.plane_probe_dass_available(mt)
@@ -501,14 +576,33 @@ mod tests {
         assert!(sink.asked.lock().unwrap().is_empty());
     }
 
+    /// The player types an ACB boot of this build creates: Feed's alone. The URI engine's handle is
+    /// created on demand, when its first source is offered (`PlaneOwner::ensure_handle`).
+    fn created_player_types() -> Vec<c_int> {
+        let mut types = Vec::new();
+        #[cfg(feature = "play-feed")]
+        types.push(plx_platform::tv::plane::DEFAULT_PLAYER_TYPE);
+        types
+    }
+
     #[test]
-    fn an_acb_device_creates_the_handle_for_this_install_and_records_it() {
-        let sink = BootSink::new(VP_ACB, 7);
+    fn an_acb_boot_creates_only_feeds_handle_and_records_it() {
+        let sink = BootSink::answering(VP_ACB, vec![7, 8]);
         let owner = booted(&sink);
-        assert_eq!(owner.facts(), PlaneFacts { handle: true, player_type: DEFAULT_PLAYER_TYPE });
         let asked = sink.asked.lock().unwrap();
-        assert_eq!(asked.len(), 1);
-        assert_eq!(asked[0], (plx_base::paths::app_id().to_owned(), DEFAULT_PLAYER_TYPE));
+        let types = created_player_types();
+        assert_eq!(*asked, types.iter().map(|t| (plx_base::paths::app_id().to_owned(), *t)).collect::<Vec<_>>(),
+            "a boot creates Feed's handle (player type 10) and no player type 0 handle");
+        // Feed's handle, its facts and its player type are what a one-handle boot always made.
+        #[cfg(feature = "play-feed")]
+        {
+            assert_eq!(owner.facts(), PlaneFacts { handle: true, player_type: DEFAULT_PLAYER_TYPE });
+            assert!(owner.initialized(PlaneHandle::Feed));
+        }
+        #[cfg(not(feature = "play-feed"))]
+        assert_eq!(owner.facts(), PlaneFacts::ABSENT, "a build with no Feed has no Feed handle");
+        assert_eq!(owner.facts_of(PlaneHandle::Uri), PlaneFacts::ABSENT, "the URI engine's handle is not a boot's");
+        assert!(!owner.initialized(PlaneHandle::Uri));
     }
 
     #[test]
@@ -516,7 +610,102 @@ mod tests {
         let sink = BootSink::new(VP_ACB, 0);
         let owner = booted(&sink);
         assert_eq!(owner.facts(), PlaneFacts { handle: false, player_type: DEFAULT_PLAYER_TYPE });
-        assert_eq!(sink.asked.lock().unwrap().len(), 1);
+        assert_eq!(sink.asked.lock().unwrap().len(), created_player_types().len());
+        assert!(!owner.initialized(PlaneHandle::Feed) && !owner.initialized(PlaneHandle::Uri));
+        assert_eq!(owner.phase(), plane::Phase::Unavailable);
+    }
+
+    /// The bug: a normal boot (no `ptype` trigger) initialized ONE handle as player type 10, so the
+    /// URI product binding (which needs player type 0) was composed `Unbound` and the Settings
+    /// opt-in could never play URI. Now the handle is not a boot's, so the binding must not wait for it.
+    #[cfg(feature = "play-uri")]
+    #[test]
+    fn a_normal_boot_composes_the_uri_product_binding_acb_before_the_uri_handle_exists() {
+        let sink = BootSink::answering(VP_ACB, vec![7, 8]);
+        let owner = booted(&sink);
+        assert_eq!(uri_product_binding(&sink, 4, &[]), UriBinding::Acb);
+        assert!(!owner.attempted(PlaneHandle::Uri), "composing the binding creates no handle");
+        assert_eq!(sink.asked.lock().unwrap().len(), created_player_types().len());
+        #[cfg(feature = "play-feed")]
+        assert_eq!(owner.facts().player_type, DEFAULT_PLAYER_TYPE, "Feed's handle is still type 10");
+    }
+
+    /// A display with no window path binds nothing, not even for a table that lists the major.
+    #[cfg(feature = "play-uri")]
+    #[test]
+    fn the_uri_product_binding_is_unbound_without_a_window_path() {
+        let sink = BootSink::answering(VP_NONE, vec![7, 8]);
+        assert_eq!(uri_product_binding(&sink, 11, &[11]), UriBinding::Unbound);
+    }
+
+    /// The exported window follows the firmware major through the composition: production's table
+    /// binds majors 5 (webOS 5.6.2) and 10 (the LG C2 on webOS 25), each admitted on a tester's run,
+    /// and majors 6, 7 and 9, each bracketed by those two with no tester run of its own, every one
+    /// with its `docs/uri-mode.md` Results row, and no other (major 8 has no image read, so it and
+    /// every webOS 5+ release without an entry plays Standard), and a table that lists a major binds
+    /// it, on a display in the exported-window mode only. The URI engine's own handle is not asked
+    /// for: a 5+ set has none.
+    #[cfg(feature = "play-uri")]
+    #[test]
+    fn the_exported_window_is_composed_only_for_a_major_the_table_lists() {
+        use plx_play_uri::backend::{EXPORTED_CANVAS, EXPORTED_STRATA};
+        let exported = UriBinding::Exported { canvas: EXPORTED_CANVAS };
+        let sink = BootSink::answering(VP_EXPORTED, vec![7, 8]);
+        // Production's table admits majors 5, 6, 7, 9 and 10 and nothing else: every other release,
+        // known or not (8, which has no image read, and 11 included), composes Unbound on this
+        // display. An entry lands with its Results row and the change to this test.
+        for major in 0..=30 {
+            let want = if matches!(major, 5 | 6 | 7 | 9 | 10) { exported } else { UriBinding::Unbound };
+            assert_eq!(uri_product_binding(&sink, major, EXPORTED_STRATA), want, "major {major}");
+        }
+        // The same display on a set whose mode is not the exported window: an admitted major binds nothing there.
+        for major in [5, 6, 7, 9, 10] {
+            for mode in [VP_NONE, plx_platform::tv::sink::VP_ACB] {
+                let sink = BootSink::answering(mode, vec![7, 8]);
+                assert_ne!(uri_product_binding(&sink, major, EXPORTED_STRATA), exported, "major {major} mode {mode}");
+            }
+        }
+        assert_eq!(uri_product_binding(&sink, 11, &[11]), exported);
+        assert_eq!(uri_product_binding(&sink, 10, &[11]), UriBinding::Unbound, "an unlisted major");
+        assert_eq!(uri_product_binding(&sink, 0, &[11]), UriBinding::Unbound, "unknown firmware");
+        // The same table on a display that is not in the exported-window mode.
+        for mode in [VP_NONE, plx_platform::tv::sink::VP_ACB] {
+            let sink = BootSink::answering(mode, vec![7, 8]);
+            assert_ne!(uri_product_binding(&sink, 11, &[11]), exported, "mode {mode}");
+        }
+    }
+
+    /// The boot line names the major and where the binding's evidence came from, so a television's
+    /// log shows both without a trigger: `evidence=table` only for a binding the table composed.
+    #[cfg(feature = "play-uri")]
+    #[test]
+    fn the_product_binding_boot_line_names_the_major_and_its_evidence() {
+        let line = |mode, major, strata: &[u32]| plx_base::eventlog::with_private_log(|| {
+            let sink = BootSink::answering(mode, vec![7, 8]);
+            uri_product_binding(&sink, major, strata);
+            std::fs::read_to_string(plx_base::eventlog::events_log()).unwrap_or_default()
+        });
+        let listed = line(VP_EXPORTED, 11, &[11]);
+        assert!(listed.contains("uri: product binding=Exported { canvas: (1920, 1080) } mode=2 "), "{listed}");
+        assert!(listed.contains(" major=11 evidence=table\n"), "{listed}");
+        let unlisted = line(VP_EXPORTED, 11, &[]);
+        assert!(unlisted.contains("uri: product binding=Unbound mode=2 "), "{unlisted}");
+        assert!(unlisted.contains(" major=11 evidence=none\n"), "{unlisted}");
+        // Production's own table: a webOS 5.6.2 television's boot line reads `major=5 evidence=table`,
+        // the LG C2 on webOS 25's `major=10 evidence=table`, and a bracketed major's (6, 7, 9) the
+        // same `evidence=table`: the line does not say whether a tester ran it. Major 8 has no
+        // image read and reads `major=8 evidence=none` on the same display.
+        for major in [5, 6, 7, 9, 10] {
+            let shipped = line(VP_EXPORTED, major, plx_play_uri::backend::EXPORTED_STRATA);
+            assert!(shipped.contains("uri: product binding=Exported { canvas: (1920, 1080) } mode=2 "), "{shipped}");
+            assert!(shipped.contains(&format!(" major={major} evidence=table\n")), "{shipped}");
+        }
+        let eight = line(VP_EXPORTED, 8, plx_play_uri::backend::EXPORTED_STRATA);
+        assert!(eight.contains("uri: product binding=Unbound mode=2 "), "{eight}");
+        assert!(eight.contains(" major=8 evidence=none\n"), "{eight}");
+        let acb = line(plx_platform::tv::sink::VP_ACB, 4, &[]);
+        assert!(acb.contains("uri: product binding=Acb mode=1 handle=deferred ptype=0 "), "{acb}");
+        assert!(acb.contains(" major=4 evidence=none\n"), "{acb}");
     }
 
     #[test]

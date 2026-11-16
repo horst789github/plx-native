@@ -36,10 +36,10 @@
 //! frozen top-level keys: no pick in this module ever writes one.
 use super::plan::{supported_quality, Quality, QUALITY_LADDER};
 use plx_plex::plex::session::{
-    MarkerSkipMode, IntroSkipPref, CreditsSkipPref, DolbyVisionMode, DolbyVisionModePref, InstantDpadSeeking, InstantDpadSeekingPref, effective, own_prefs, persist_profile_pref, AudioEnhancementsPref, DeckPress, DeckPressPref, DirectPlayMode,
+    MarkerSkipMode, IntroSkipPref, CreditsSkipPref, DolbyVisionMode, DolbyVisionModePref, InstantDpadSeeking, InstantDpadSeekingPref, UriEngine, UriEnginePref, effective, own_prefs, persist_profile_pref, AudioEnhancementsPref, DeckPress, DeckPressPref, DirectPlayMode,
     DirectPlayModePref, HdrOverlayBrightness, HdrOverlayBrightnessPref, NextEpisodeMode, NextEpisodeModePref, Preferences, ProfilePrefs, ProfilePrefsRecord,
     ProfileSetting, ProfileWrite, QualityPref, Row, Setting, SkipInterval, SkipIntervalPref, SubtitlePosition,
-    SubtitlePositionPref, SubtitleSize, SubtitleSizePref, SubtitleTone, SubtitleTonePref, TrailerAutoplayPref, UnderPosters,
+    SubtitlePositionPref, SubtitleSize, SubtitleSizePref, SubtitleTone, SubtitleTonePref, TrailerAutoplayPref, HudEndTimePref, UnderPosters,
     UnderPostersPref,
 };
 use plx_plex::plex::session::prefs::{
@@ -143,7 +143,7 @@ macro_rules! packed_by_index {
         }
     )*};
 }
-packed_by_index!(MarkerSkipMode = 1, DolbyVisionMode = 0, InstantDpadSeeking = 0, NextEpisodeMode = 0, SkipInterval = 1, DeckPress = 0, SubtitleSize = 1, SubtitlePosition = 0, SubtitleTone = 0, HdrOverlayBrightness = 1);
+packed_by_index!(MarkerSkipMode = 1, DolbyVisionMode = 0, InstantDpadSeeking = 0, UriEngine = 0, NextEpisodeMode = 0, SkipInterval = 1, DeckPress = 0, SubtitleSize = 1, SubtitlePosition = 0, SubtitleTone = 0, HdrOverlayBrightness = 1);
 
 impl Packed for DirectPlayMode {
     const SEED: u16 = 0;
@@ -233,6 +233,7 @@ impl Packed for AudioEnhancements {
 }
 
 live_cell!(pub(super) INSTANT_DPAD_SEEKING: InstantDpadSeeking, "instant D-pad seeking");
+live_cell!(pub(super) URI_ENGINE: UriEngine, "playback engine");
 live_cell!(pub(super) INTRO_SKIP: MarkerSkipMode, "intro skip");
 live_cell!(pub(super) CREDITS_SKIP: MarkerSkipMode, "credits skip");
 live_cell!(pub(super) DOLBY_VISION_MODE: DolbyVisionMode, "Dolby Vision mode");
@@ -278,6 +279,10 @@ live_cell!(
     /// How bright the player's overlay and captions are drawn while the picture is HDR. Read once per
     /// frame by the app's player draw (`route::overlay_gain`).
     pub(super) HDR_OVERLAY_BRIGHTNESS: HdrOverlayBrightness, "HDR overlay brightness preference"
+);
+live_cell!(
+    /// Whether the player HUD shows the projected local end time beside the remaining clock.
+    pub(super) HUD_END_TIME: bool, "estimated playback end time"
 );
 live_cell!(
     /// The seated profile's current quality pick. An atomic rather than a field on `Session` because it
@@ -330,6 +335,7 @@ macro_rules! live_setting {
 
 live_setting!(DirectPlayModePref, DIRECT_PLAY_MODE, "direct play mode");
 live_setting!(InstantDpadSeekingPref, INSTANT_DPAD_SEEKING, "instant D-pad seeking");
+live_setting!(UriEnginePref, URI_ENGINE, "playback engine");
 live_setting!(IntroSkipPref, INTRO_SKIP, "intro skip");
 live_setting!(CreditsSkipPref, CREDITS_SKIP, "credits skip");
 live_setting!(DolbyVisionModePref, DOLBY_VISION_MODE, "Dolby Vision mode");
@@ -341,6 +347,7 @@ live_setting!(HdrOverlayBrightnessPref, HDR_OVERLAY_BRIGHTNESS, "HDR overlay bri
 live_setting!(SubtitleTonePref, crate::player::SUBTITLE_TONE, "subtitle tone");
 live_setting!(AudioEnhancementsPref, crate::player::AUDIO_ENHANCEMENTS, "audio enhancements");
 live_setting!(TrailerAutoplayPref, crate::player::preview::TRAILER_AUTOPLAY, "hero trailer autoplay");
+live_setting!(HudEndTimePref, HUD_END_TIME, "estimated playback end time");
 live_setting!(NextEpisodeModePref, NEXT_EPISODE_MODE, "next episode mode",
     fn after_saved(mode: NextEpisodeMode) {
         plx_telemetry::diag::event(plx_telemetry::diag::schema::DiagEvent::FeatureUsed {
@@ -373,11 +380,13 @@ pub struct LiveRow {
     /// Always `S::SCOPE`; every live row is `Profile` since the nine moved (T-live checks it).
     pub scope: plx_plex::plex::session::prefs::Scope,
     restore: fn(&Preferences, Option<&ProfilePrefs>, &Overrides),
+    read: fn() -> u16,
 }
 
 impl LiveRow {
-    pub const fn of<S: LiveSetting>() -> LiveRow {
-        LiveRow { key: S::KEY, live: S::LIVE, scope: S::SCOPE, restore: restore_row::<S> }
+    pub const fn of<S: LiveSetting>() -> LiveRow where S::Value: Packed {
+        LiveRow { key: S::KEY, live: S::LIVE, scope: S::SCOPE, restore: restore_row::<S>,
+            read: || S::live().to_bits() }
     }
 }
 
@@ -393,6 +402,7 @@ pub const LIVE_ROWS: &[LiveRow] = &[
     LiveRow::of::<NextEpisodeModePref>(),
     LiveRow::of::<SkipIntervalPref>(),
     LiveRow::of::<InstantDpadSeekingPref>(),
+    LiveRow::of::<UriEnginePref>(),
     LiveRow::of::<DolbyVisionModePref>(),
     LiveRow::of::<IntroSkipPref>(),
     LiveRow::of::<CreditsSkipPref>(),
@@ -400,7 +410,14 @@ pub const LIVE_ROWS: &[LiveRow] = &[
     LiveRow::of::<UnderPostersPref>(),
     LiveRow::of::<AudioEnhancementsPref>(),
     LiveRow::of::<TrailerAutoplayPref>(),
+    LiveRow::of::<HudEndTimePref>(),
 ];
+
+/// Capture the actual packed values of every live preference, in LIVE_ROWS order.
+/// The app compares these at its IO boundary; this is not a dirty flag or an event queue.
+pub fn preference_values() -> Vec<u16> {
+    LIVE_ROWS.iter().map(|row| (row.read)()).collect()
+}
 
 // ---- restore --------------------------------------------------------------------------------
 
@@ -780,14 +797,17 @@ choices! {
     NextEpisode => NextEpisodeModePref,
     SkipInterval => SkipIntervalPref,
     InstantDpadSeeking => InstantDpadSeekingPref,
+    UriEngine => UriEnginePref,
     DolbyVision => DolbyVisionModePref,
     IntroSkip => IntroSkipPref,
     CreditsSkip => CreditsSkipPref,
     DeckPress => DeckPressPref,
     UnderPosters => UnderPostersPref,
     TrailerAutoplay => TrailerAutoplayPref,
+    HudEndTime => HudEndTimePref,
     SubtitleSize => SubtitleSizePref,
     SubtitlePosition => SubtitlePositionPref,
+    SubtitleTone => SubtitleTonePref,
     HdrOverlayBrightness => HdrOverlayBrightnessPref,
 }
 
@@ -811,7 +831,7 @@ fn choose_via<S: LiveSetting>(v: S::Value, how: How, normalize: impl FnOnce(S::V
             }
             How::Optimistic(reply) => {
                 S::publish(v);
-                plx_machine::idle::invalidate();
+                // The input runner observes the live preference values.
                 if let Some(reply) = reply {
                     let _ = reply.send(false);
                 }
@@ -824,13 +844,13 @@ fn choose_via<S: LiveSetting>(v: S::Value, how: How, normalize: impl FnOnce(S::V
             let _ = plx_base::storage_worker::submit_retained(move || {
                 let saved = confirm_with::<S>(&write, v);
                 let _ = reply.send(saved);
-                plx_machine::idle::invalidate();
+                // Reply is the addressed completion; the worker claims no UI damage.
             });
         }
         How::Optimistic(reply) => {
             PROFILE_PREFS.put::<S>(&write, v);
             S::publish(v);
-            plx_machine::idle::invalidate();
+            // The input runner observes the live preference values.
             let _ = plx_base::storage_worker::submit_retained(move || {
                 let saved = persist_profile_pref::<S>(&write, v);
                 if !saved {
@@ -842,7 +862,7 @@ fn choose_via<S: LiveSetting>(v: S::Value, how: How, normalize: impl FnOnce(S::V
                 if let Some(reply) = reply {
                     let _ = reply.send(saved);
                 }
-                plx_machine::idle::invalidate();
+                // Reply is the addressed completion; the worker claims no UI damage.
             });
         }
     }
@@ -877,7 +897,7 @@ fn confirm_with<S: LiveSetting>(write: &ProfileWrite, v: S::Value) -> bool {
         if session::current_seat() == write.seat() {
             S::publish(v);
         }
-        plx_machine::idle::invalidate();
+        // Confirmed live values are captured at the main-thread Bridge boundary.
         S::after_saved(v);
     }
     saved
@@ -905,6 +925,11 @@ pub fn set_next_episode_mode(mode: NextEpisodeMode) -> bool { confirm::<NextEpis
 pub fn instant_dpad_seeking() -> InstantDpadSeeking { InstantDpadSeekingPref::live() }
 pub fn restore_instant_dpad_seeking(seeking: InstantDpadSeeking) { restore_live::<InstantDpadSeekingPref>(seeking) }
 
+/// The seated profile's playback engine: `On` is the viewer's opt-in to the URI engine. The route
+/// owner snapshots it into `ResolveEnv` at the press, as the quality and the direct-play mode.
+pub fn uri_engine() -> UriEngine { UriEnginePref::live() }
+pub fn restore_uri_engine(engine: UriEngine) { restore_live::<UriEnginePref>(engine) }
+
 pub fn dolby_vision_mode() -> DolbyVisionMode { DolbyVisionModePref::live() }
 pub fn restore_dolby_vision_mode(mode: DolbyVisionMode) { restore_live::<DolbyVisionModePref>(mode) }
 
@@ -917,6 +942,11 @@ pub fn deck_press() -> DeckPress { DeckPressPref::live() }
 pub fn restore_deck_press(mode: DeckPress) { restore_live::<DeckPressPref>(mode) }
 /// Blocking persistence seam, as [`set_next_episode_mode`].
 pub fn set_deck_press(mode: DeckPress) -> bool { confirm::<DeckPressPref>(mode) }
+
+/// Whether the seated profile shows the projected end time in the player HUD.
+pub fn hud_end_time() -> bool { HudEndTimePref::live() }
+/// Restore the end-time cell from the active profile without writing it back.
+pub fn restore_hud_end_time(v: bool) { restore_live::<HudEndTimePref>(v) }
 
 /// What sits under the focused poster, for the seated profile. Safe from any thread; a reader takes
 /// no lock.
