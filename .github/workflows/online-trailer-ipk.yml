@@ -98,7 +98,7 @@ jobs:
           REQUIRE_PACKAGE: "1"
           ADAPTER: ${{ inputs.trailer_adapter }}
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           python3 ci/check-package.py || exit 1
           ./ci/check-elf.sh 2>&1 | tee "$RUNNER_TEMP/elf.log"
           [ "${PIPESTATUS[0]}" -eq 0 ] && exit 0
