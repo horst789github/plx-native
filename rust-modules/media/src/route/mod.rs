@@ -17,6 +17,7 @@ mod decision;
 mod queue_navigation;
 pub use queue_navigation::{QueueContinuation, QueueStep, queue_neighbor, queue_neighbors};
 mod flight;
+mod online_trailer;
 mod plan;
 mod prefs;
 mod track_memory;

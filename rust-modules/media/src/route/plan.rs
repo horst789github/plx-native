@@ -1798,6 +1798,11 @@ pub enum SubWrite {
 /// the wrong authority for every id in this function. The server arrives in `env.sid` and the only
 /// client here is `client_for` of it.
 pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str, vcodec: &str, acodec: &str, env: &ResolveEnv) -> Plan {
+    // An online trailer (`plx_data::metadata::online_trailer`) is not a PMS item: its plan comes
+    // from the LAN trailer adapter and must never reach `/decision`, a PlayQueue or a PMS fetch.
+    if plx_data::metadata::online_trailer::is_part(part) {
+        return super::online_trailer::plan(part, env);
+    }
     // The play queue is asked for beside the rest of the plan, on a sibling thread of this scope
     // (`plx_base::task::beside`). The scope joins it on EVERY exit of the body, the early returns
     // included, and `land_queue` is the one place its answer joins the plan.

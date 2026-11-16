@@ -8285,6 +8285,11 @@ pub fn scrobble_stop(
     let mark_watched = std::mem::take(&mut ps.finished);
     let (aud, sub) = (cur_audio_sid(ps), cur_sub_sid(ps)); // the selection this playback reported under
     let tsession = take_active_encoder();
+    // An online trailer (adapter fallback) is not a server item: it reports nothing. The encoder
+    // slot is still taken above, so nothing of it outlives the stop.
+    if online_trailer_session(ps) {
+        return;
+    }
     let session = if tsession.is_empty() {
         logical_session
     } else {
@@ -10200,6 +10205,17 @@ pub fn preview_request(ps: &PlaybackSession) -> bool {
     ps.preview || ps.resolved_as_preview
 }
 
+/// Is the INSTALLED session an online trailer (`plx_data::metadata::online_trailer`, the LAN
+/// adapter fallback)? Read from `cur_rk`, which only a landing installs, for the same reason
+/// [`preview_request`] reads the installed session rather than `request`. Such a session is no
+/// server item: the timeline lease and the stop scrobble refuse it, so a full-screen online
+/// trailer writes no progress and no watched state. Unlike [`preview_request`] it does NOT route
+/// open failures to the preview machine: played from the Trailer disc it is ordinary playback on
+/// the player page, with that page's failure read-out and Retry.
+pub fn online_trailer_session(ps: &PlaybackSession) -> bool {
+    plx_data::metadata::online_trailer::is_rk(&ps.cur_rk)
+}
+
 /// Attach the UI's resume point to the resolve currently in flight.
 ///
 /// `request_play_*` is issued immediately before `app::start_playback`, so the latter knows the
@@ -10349,7 +10365,10 @@ fn request_env(
     env.omit_queue_continuous = plx_data::metadata::context_omits_queue_continuous(&request.ctx);
     env.queue_show_rk = request.show_rk.clone();
     env.set_preview(request.preview);
-    env.fresh_play = retry.is_none() && !request.preview;
+    // An online trailer has no server-side selection to write a remembered choice back to.
+    env.fresh_play = retry.is_none()
+        && !request.preview
+        && !plx_data::metadata::online_trailer::is_part(&request.part);
     env.version = request.version;
     if env.version.is_some() {
         // Both describe the default version: a picked one is measured from its own fetch.
@@ -13819,8 +13838,9 @@ pub fn set_forced_only_lang_for_test(ps: &mut PlaybackSession, lang: &str) {
 /// is not reset here: the new reporter's first report still stops it when the reload (or a
 /// rollback's rebase) retired it.
 pub fn begin_timeline_reporting(ps: &PlaybackSession) -> Option<TimelineLease> {
-    // A trailer never writes watch state, whatever became of its preview flag.
-    if preview_request(ps) {
+    // A trailer never writes watch state, whatever became of its preview flag — and an online
+    // trailer (adapter fallback) is no server item to write it for.
+    if preview_request(ps) || online_trailer_session(ps) {
         return None;
     }
     let projection = TimelineProjection {

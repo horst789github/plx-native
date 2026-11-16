@@ -1,0 +1,103 @@
+name: online-trailer debug ipk
+
+# Builds the online-trailer branch as the SEPARATE debug install (`com.beb.plxnative.debug`), so it
+# sits beside the regular PlxNative on the television instead of replacing it. Manual only.
+#
+# Two independent jobs, so a red host test never hides the package and vice versa:
+#   * host   — the new unit tests (data + media), and the shipping feature set's type-check.
+#   * ipk    — the real ARMv7 cross-build with the pinned toolchain and the webOS NDK, through the
+#              repository's own Makefile (`make` + `make ipk`) and its package gate, uploaded as
+#              an artifact.
+#
+# RELEASE=1 drops the `devtools` and `devtriggers` features, so the package has no /tmp trigger
+# surface; FLAVOR=debug is only what picks the separate app id. No telemetry credentials are
+# passed, so the build sends nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      trailer_adapter:
+        description: 'Trailer adapter base URL (dotted quad, http). Empty disables the fallback.'
+        type: string
+        default: 'http://192.168.0.2:8765'
+      trailer_quality:
+        description: 'Optional adapter quality parameter (e.g. 1080 or 2160). Empty = adapter default.'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    name: host tests (online trailer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/host-rust
+        with:
+          sdl: "true"
+      - name: data layer — online_trailer tests
+        run: make test-crate C=plx_data T=online_trailer
+      - name: media layer — online_trailer tests
+        run: make test-crate C=plx_media T=online_trailer
+      - name: existing trailer picker tests still pass
+        run: make test-crate C=plx_data T=trailer_tests
+      - name: shipping feature set type-checks
+        run: make check-nodef
+
+  ipk:
+    name: ARMv7 build + ipk (debug id)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate inputs
+        env:
+          ADAPTER: ${{ inputs.trailer_adapter }}
+          QUALITY: ${{ inputs.trailer_quality }}
+        run: |
+          set -euo pipefail
+          if [ -n "$ADAPTER" ] && ! [[ "$ADAPTER" =~ ^http://[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]{1,5})?/?$ ]]; then
+            echo "::error::trailer_adapter must look like http://192.168.0.2:8765 (got '$ADAPTER')"; exit 1
+          fi
+          if [ -n "$QUALITY" ] && ! [[ "$QUALITY" =~ ^[0-9]{3,4}$ ]]; then
+            echo "::error::trailer_quality must be digits like 1080 or 2160 (got '$QUALITY')"; exit 1
+          fi
+
+      - name: Install the pinned Rust and the armv7 target
+        uses: ./.github/actions/rust-toolchain
+
+      - id: ndk
+        uses: ./.github/actions/webos-ndk
+
+      - name: Build + package
+        env:
+          WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
+          FLAVOR: debug
+          RELEASE: "1"
+          PLX_TRAILER_ADAPTER: ${{ inputs.trailer_adapter }}
+          PLX_TRAILER_QUALITY: ${{ inputs.trailer_quality }}
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)"
+          make ipk
+          ls -l pkg/*.ipk
+          echo "appid: $(make -s print-appid FLAVOR=debug)"
+
+      - name: Package assertions
+        env:
+          WEBOS_SDK: ${{ steps.ndk.outputs.sdk-dir }}
+          REQUIRE_PACKAGE: "1"
+        run: |
+          ./ci/check-elf.sh
+          python3 ci/check-package.py
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: plxnative-online-trailer-debug-ipk
+          path: pkg/*.ipk
+          if-no-files-found: error

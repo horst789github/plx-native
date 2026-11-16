@@ -5,6 +5,7 @@
 //! buffers from the C port are gone.
 use std::os::raw::c_int;
 pub mod episode_list;
+pub mod online_trailer;
 pub mod record;
 pub mod sub_layout;
 pub mod track_label;
@@ -3844,6 +3845,11 @@ pub fn fetch_full(client: &'static plx_plex::plex::Client, sid: plx_plex::plex::
         }
     } else {
         extras_src = "skip";
+    }
+    // No trailer from the server: offer the configured LAN trailer adapter's instead
+    // (`online_trailer`). Pure — nothing is asked of the adapter until a trailer is started.
+    if extras_wanted(&d.kind) && online_trailer::fill(&mut d) {
+        plx_base::eventlog::log(&format!("detail: rk={rk} trailer=online (adapter fallback)"));
     }
     // The item's IDENTITY and the SHAPE of what came back — never its title. `scrub_local` runs
     // on every line in every build, but nothing in a line distinguishes a programme title from
