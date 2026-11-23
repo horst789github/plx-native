@@ -6161,7 +6161,7 @@ pub fn demux(
                     &mut *state as *mut AvioState as *mut c_void,
                     Some(read_cb),
                     None,
-                    Some(seek_cb),
+                    if size < 0 { None } else { Some(seek_cb) },
                 );
                 if avio.is_null() {
                     session.media().record("ff: avio_alloc_context failed");
