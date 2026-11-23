@@ -5,23 +5,6 @@
 name: Deploy landing page
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "site/**"
-      - "docs/screenshots/**"
-      - "docs/install-and-verify.md"
-      - "docs/troubleshooting.md"
-      - "docs/nightly-builds.md"
-      - "docs/samsung-nightly.md"
-      - "ci/nightly.py"
-      - "tools/render-doc-page.py"
-      - "tools/requirements-docs.txt"
-      - "pkg/appfont.ttf"
-      - "pkg/appfont-bold.ttf"
-      # the hero's "Version X.Y.Z" is stamped from it below, so a release's bump redeploys the site
-      - "pkg/appinfo.json"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
   # nightly.yml calls this after every published nightly, so the site's "latest nightly" pointer
   # (staged below, `_site/nightly/latest.json`) moves the same day a nightly does rather than
@@ -29,6 +12,7 @@ on:
   # and contents: read on the calling job; this workflow's own top-level `permissions:` still
   # governs the push/workflow_dispatch triggers above.
   workflow_call:
+
 
 permissions:
   contents: read

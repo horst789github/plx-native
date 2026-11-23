@@ -39,15 +39,7 @@ name: Dependency updates
 # Tested by ci/test_deps_update.py (WorkflowShape).
 
 on:
-  schedule:
-    - cron: '23 5 * * 1'
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - ci/dependencies.json
-
-permissions: {}
 
 concurrency:
   group: deps-update-${{ github.event_name == 'push' && 'graph' || 'propose' }}

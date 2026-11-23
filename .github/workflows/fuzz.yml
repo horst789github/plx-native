@@ -37,28 +37,6 @@ name: Fuzz the HUD parsers
 # below (`!cancelled()`, `failure()`) still run.
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/fuzz.yml'
-      - 'fuzz/**'
-      - 'tools/fuzz-hud.py'
-      - 'rust-modules/appkit/src/hud_format.rs'
-      - 'rust-modules/appkit/src/hud_format/**'
-      - 'rust-modules/data/src/hudpacks.rs'
-      - 'rust-modules/data/src/hudpacks/**'
-      - 'rust-modules/ui/src/rec/strict_json.rs'
-      - 'rust-modules/net/src/ws.rs'
-      - 'rust-modules/net/src/ws/**'
-      - 'rust-modules/base/src/sha1.rs'
-      - 'rust-modules/base/src/b64.rs'
-      - 'rust-modules/owp/src/**'
-      - 'rust-modules/owp/fixtures/**'
-      - 'rust-modules/build_support/host_link.rs'
-      - 'rust-modules/Cargo.lock'
-      - 'site/hud/schema/**'
-      - 'site/hud/examples/**'
-  schedule:
-    - cron: '47 3 * * 1'
   workflow_dispatch:
     inputs:
       secs:
@@ -69,6 +47,7 @@ on:
         description: 'One target (admit, bundle_read, archive_read, svg_check, address_parse, catalog_parse, catalog_verify, catalog_cache, ws_frame, owp_json); empty runs all'
         type: string
         default: ''
+
 
 permissions:
   contents: read

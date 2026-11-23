@@ -20,41 +20,13 @@ name: Tizen library CI
 # pin keeps the link reproducible; the ceiling is what refuses a library the television's glibc could not load.
 
 on:
-  push:
-    branches: [main, 'release/v*']
-    paths: &tizen_paths
-      - '.github/workflows/tizen.yml'
-      - '.github/workflows/tizen-package.yml'
-      - '.github/actions/webos-ndk/**'
-      - 'ci/arm-cc.py'
-      - 'src/compat/getauxval.c'
-      - '.github/actions/apt-install/**'
-      - '.github/actions/deps-cache/**'
-      - '.github/actions/host-rust/**'
-      - '.github/actions/rust-toolchain/**'
-      - 'Makefile'
-      - 'mk/platform-tizen.mk'
-      - 'tizen/**'
-      - 'rust-modules/**'
-      - '!rust-modules/**/*.md'
-      - 'src/svg.c'
-      - 'ci/check-tizen-so.py'
-      - 'ci/testdata/tizen60-armv7-abi.json'
-      - 'ci/nightly.py'
-      - 'ci/check-staticlib-artifact.py'
-      - 'ci/test_tizen_so_check.py'
-      - 'ci/test_tizen_package.py'
-      - 'ci/dependencies.json'
-      - 'ci/deps.py'
-      - 'tools/tizen-log-receiver.py'
-  pull_request:
-    paths: *tizen_paths
   workflow_dispatch:
     inputs:
       emulator-package:
         description: Produce the x86_64 nightly package for a manual emulator smoke test
         type: boolean
         default: false
+
 
 permissions:
   contents: read

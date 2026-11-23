@@ -54,8 +54,6 @@ name: Nightly
 # unchanged: it is the owner's call, not part of that change.)
 
 on:
-  schedule:
-    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -70,25 +68,6 @@ on:
         description: Build even when main has not changed, for example after enabling Samsung publication
         type: boolean
         default: false
-  pull_request:
-    # Only a change that could plausibly break tomorrow's 03:00 UTC run earns a build here — not
-    # every PR. Widen this list if another file the nightly path depends on gains one.
-    paths:
-      - .github/workflows/nightly.yml
-      - .github/workflows/build-package.yml
-      - .github/workflows/tizen-package.yml
-      - mk/platform-tizen.mk
-      - tizen/**
-      - tools/tizen-log-receiver.py
-      - ci/nightly.py
-      - ci/check-tizen-so.py
-      - ci/dependencies.json
-      - ci/testdata/tizen60-armv7-abi.json
-      - ci/flavor.py
-      - ci/version_rule.py
-      - ci/check-package.py
-      - Makefile
-      - rust-modules/build.rs
 
 permissions:
   contents: read

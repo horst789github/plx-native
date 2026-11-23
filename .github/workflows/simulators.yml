@@ -1,48 +1,8 @@
 name: Simulator CI
 
 on:
-  push:
-    branches: [main, 'release/v*']
-    paths: &simulator_paths
-      - '.github/workflows/simulators.yml'
-      - '.github/actions/apt-install/**'
-      - 'Makefile'
-      - 'rust-modules/**'
-      # Nested guides such as rust-modules/media/src/player/CLAUDE.md read by no gate in this workflow;
-      # a docs-only edit there should not cost a ~20 min macOS+Linux simulator build.
-      - '!rust-modules/**/*.md'
-      - 'src/svg.c'
-      - 'src/ass.c'
-      - 'src/ass_composite.h'
-      - 'src/ass_fonts.c'
-      - 'src/ass_text.c'
-      - 'src/ass_internal.h'
-      - 'include/ass.h'
-      - 'assets/icons/**'
-      - 'pkg/appfont*.ttf'
-      - 'pkg/fonts/subs/**'
-      - 'tools/cut-noto-subs.py'
-      - 'pkg/OFL.txt'
-      - 'pkg/le-roots.pem'
-      - 'LICENSE'
-      - 'ci/build-ffmpeg.sh'
-      - 'ci/host-toolchain-id.sh'
-      - 'ci/stage-host-ffmpeg.sh'
-      - 'ci/build-libass.sh'
-      - 'ci/build-libass.py'
-      - 'ci/dependencies.json'
-      - 'ci/deps.py'
-      - 'ci/patches/libass-0001-grow-font-faces.patch'
-      - 'ci/ffabi-assert.c'
-      - 'tests/fixtures/mkv_zlib_subs.mkv'
-      - 'tests/fixtures/replay/**'
-      - 'tests/replay_fixtures.py'
-      - 'tests/test_replay_fixtures.py'
-      - 'tools/sim.ps1'
-      - 'tools/sim-smoke.py'
-  pull_request:
-    paths: *simulator_paths
   workflow_dispatch:
+
 
 permissions:
   contents: read

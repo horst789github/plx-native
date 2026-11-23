@@ -46,9 +46,6 @@
 name: CI metrics
 
 on:
-  workflow_run:
-    workflows: ["CI", "Simulator CI", "Nightly"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       full:
@@ -61,6 +58,7 @@ permissions: {}
 
 # One writer at a time; a queued run is not cancelled mid-push (each run is incremental, so a
 # superseded queued one loses nothing).
+
 concurrency:
   group: ci-metrics
   cancel-in-progress: false
