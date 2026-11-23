@@ -36,8 +36,6 @@ name: Issue labels
 # broken rule shows up as a red run instead of weeks of silently wrong labels.
 
 on:
-  issues:
-    types: [opened, reopened, edited]
   workflow_dispatch:
     inputs:
       issues:
@@ -49,6 +47,7 @@ on:
         required: false
         type: boolean
         default: true
+
 
 permissions:
   contents: read

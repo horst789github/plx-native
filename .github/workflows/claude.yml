@@ -65,14 +65,7 @@ name: Claude
 #   Claude's environment from /proc. GH_TOKEN stays in the environment; it is the short-lived job token.
 
 on:
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
-  pull_request_review:
-    types: [submitted]
-  issues:
-    types: [opened]
+  workflow_dispatch:
 
 concurrency:
   group: claude-${{ github.event.issue.number || github.event.pull_request.number }}

@@ -1,22 +1,6 @@
 name: HUD authoring simulator
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/hud-simulator.yml'
-      - 'tools/hud_*.py'
-      - 'tools/screenshots.py'
-      - 'rust-modules/src/hud_*.rs'
-      - 'rust-modules/appkit/src/hud_format*'
-      - 'rust-modules/appkit/src/hud_format/**'
-      - 'rust-modules/appkit/src/player_hud*'
-      - 'rust-modules/appkit/src/player_hud/**'
-      - 'rust-modules/ui/src/rec/strict_json.rs'
-      - 'rust-modules/appkit/Cargo.toml'
-      - 'rust-modules/Cargo.lock'
-      - 'site/hud/**'
-      - 'tests/test_hud_*.py'
-      - 'rust-modules/src/dev/framedump.rs'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -36,6 +20,7 @@ on:
       release_tag:
         required: true
         type: string
+
 
 permissions:
   contents: read

@@ -39,8 +39,6 @@ name: Release
 # start a workflow run from a GITHUB_TOKEN push. So the `push: tags` trigger below stays for a
 # hand-pushed tag without re-firing on our own.
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       bump:
@@ -72,6 +70,7 @@ on:
         type: string
         required: false
         default: ''
+
 
 permissions:
   contents: read

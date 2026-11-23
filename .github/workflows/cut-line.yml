@@ -29,6 +29,7 @@ on:
         options: [minor, major]
         default: minor
 
+
 permissions:
   contents: read
 

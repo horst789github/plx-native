@@ -28,10 +28,8 @@ name: Cache cleanup
 # `github.event.pull_request`, or a wider `permissions:` block.
 
 on:
-  pull_request_target:
-    types: [closed]
+  workflow_dispatch:
 
-# Everything not named here is `none`: no `contents`, no `pull-requests`, no `id-token`.
 permissions:
   actions: write
 

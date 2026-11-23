@@ -62,10 +62,6 @@
 name: Build bench
 
 on:
-  schedule:
-    # 04:17 UTC: off the top of the hour, when scheduled workflows queue the longest, and after the
-    # day's merges from both sides of the Atlantic have settled.
-    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       only:
@@ -77,6 +73,7 @@ on:
 permissions: {}
 
 # One measurement at a time. A second one would only add load to the first one's numbers.
+
 concurrency:
   group: build-bench
   cancel-in-progress: false

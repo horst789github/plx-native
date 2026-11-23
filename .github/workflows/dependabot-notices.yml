@@ -66,14 +66,7 @@ name: Dependabot notices
 # Listed in .github/dependabot.yml's header and tested by ci/test_ci_workflows.py (DependabotNotices).
 
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened]
-    paths:
-      - rust-modules/Cargo.lock
-      - 'rust-modules/**/Cargo.toml'
-      - rust-modules/rust-toolchain.toml
-
-permissions: {}
+  workflow_dispatch:
 
 concurrency:
   # One run per PR, never cancelled mid-push; a newer one queues behind it.

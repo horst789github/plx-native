@@ -18,8 +18,7 @@ name: Backport
 # `env`, never through `${{ }}` interpolation into the script.
 
 on:
-  pull_request_target:
-    types: [closed, labeled]
+  workflow_dispatch:
 
 permissions:
   contents: read

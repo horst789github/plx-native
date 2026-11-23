@@ -45,10 +45,6 @@ on:
         description: 'Build and gate everything, but bump, tag and publish nothing'
         type: boolean
         default: false
-  pull_request:
-    paths:
-      - .github/workflows/rc.yml
-      - ci/rc.py
 
 permissions:
   contents: read
