@@ -29,6 +29,8 @@ jobs:
           echo "PlxNative-Version: $version"
           echo "Branch: $GITHUB_REF_NAME"
           echo "Commit: $(git rev-parse --short HEAD)"
+          echo "### PlxNative-IPK: v$version" >> "$GITHUB_STEP_SUMMARY"
+          echo "Branch: $GITHUB_REF_NAME · Commit: $(git rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Pruefen, ob die Online-Trailer-Integration im Branch vorhanden ist
         shell: bash
