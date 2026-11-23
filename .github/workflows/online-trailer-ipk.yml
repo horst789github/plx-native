@@ -15,10 +15,6 @@ run-name: "DE-Trailer IPK aus ${{ github.ref_name }} (${{ github.sha }})"
 # passed, so the build sends nothing.
 
 on:
-  # Einmalige automatische Ausfuehrung fuer die Validierung dieses Fixes.
-  push:
-    branches: [online-trailer]
-    paths: ['.github/workflows/online-trailer-ipk.yml']
   workflow_dispatch:
     inputs:
       trailer_adapter:
