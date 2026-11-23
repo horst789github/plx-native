@@ -15,10 +15,6 @@ run-name: "DE-Trailer IPK aus ${{ github.ref_name }} (${{ github.sha }})"
 # passed, so the build sends nothing.
 
 on:
-  # Einmaliger automatischer Build fuer den Seek-Fix; anschliessend wieder entfernen.
-  push:
-    branches: [online-trailer]
-    paths: ['rust-modules/play-feed/src/ff.rs']
   workflow_dispatch:
     inputs:
       trailer_adapter:
