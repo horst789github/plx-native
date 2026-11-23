@@ -1,11 +1,12 @@
-{"updated":"2026-11-23T16:32:33Z",
+{"updated":"2026-11-23T16:39:21Z",
 "ci":[
 {"id":42498073426,"at":"2026-11-08T16:05:13Z","sha":"67131301f","title":"Create online-trailer-ipk.yml","pr":null,"conclusion":"failure","attempt":1,"jobs":{"which gates apply":4,"host harness tests":321,"host lint + type-checks":254,"armv7 cross-build and artifact assertions":467,"host python/shell/C gates":235,"cross-build (armv7) + artifact assertions":2},"failed":["host checks (NOT a device gate)","host unit tests (default features)","host unit tests (hostsim)"]},
 {"id":43971327347,"at":"2026-11-16T22:34:19Z","sha":"0f383960b","title":"Merge branch 'plxnative:main' into main","pr":null,"conclusion":"success","attempt":1,"jobs":{"which gates apply":5,"host python/shell/C gates":183,"host harness tests":239,"armv7 cross-build and artifact assertions":476,"host unit tests (hostsim)":215,"host unit tests (default features)":465,"host lint + type-checks":272,"host checks (NOT a device gate)":2,"cross-build (armv7) + artifact assertions":3}},
 {"id":45216073632,"at":"2026-11-23T16:24:06Z","sha":"a7fc9e89f","title":"Merge branch 'plxnative:main' into main","pr":null,"conclusion":"success","attempt":1,"jobs":{"which gates apply":8,"host lint + type-checks":310,"host unit tests (default features)":385,"host harness tests":257,"armv7 cross-build and artifact assertions":475,"host unit tests (hostsim)":261,"host python/shell/C gates":232,"host checks (NOT a device gate)":5,"cross-build (armv7) + artifact assertions":3}}
 ],
 "sim":[
-{"id":43971327322,"at":"2026-11-16T22:34:19Z","sha":"0f383960b","title":"Merge branch 'plxnative:main' into main","pr":null,"conclusion":"failure","attempt":1,"jobs":{"Windows launcher syntax":19,"Linux simulator build + launch":406}}
+{"id":43971327322,"at":"2026-11-16T22:34:19Z","sha":"0f383960b","title":"Merge branch 'plxnative:main' into main","pr":null,"conclusion":"failure","attempt":1,"jobs":{"Windows launcher syntax":19,"Linux simulator build + launch":406}},
+{"id":45216072940,"at":"2026-11-23T16:24:06Z","sha":"a7fc9e89f","title":"Merge branch 'plxnative:main' into main","pr":null,"conclusion":"failure","attempt":1,"jobs":{"Windows launcher syntax":21,"Linux simulator build + launch":458}}
 ],
 "nightly":[],
 "cancelled":{},
